@@ -4,7 +4,9 @@
 
 No cloud relay for your code. The host runs on your Windows machine; your phone talks to it through Tailscale. MCP servers and local tools stay on the PC.
 
-![Agent tab](docs/screenshots/agent-tab.png)
+Screenshots below are **captured from the real phone web UI** (sample chat/file names only — not a mockup). Refresh them anytime with `Host\capture_screenshots.py` while the host is running.
+
+![Agent tab — chat, mode picker, composer](docs/screenshots/agent-tab.png)
 
 ---
 
@@ -16,7 +18,9 @@ No cloud relay for your code. The host runs on your Windows machine; your phone 
 | **Desktop** | Low-latency stream of the Cursor window with touch, pinch-zoom, pan, and right-click |
 | **Files** | Browse folders on the PC, preview images/text, open in Explorer |
 
-![Desktop tab](docs/screenshots/desktop-tab.png)
+![Desktop tab — live Cursor window stream with touch](docs/screenshots/desktop-tab.png)
+
+![Files tab — browse PC folders from phone](docs/screenshots/files-tab.png)
 
 ---
 
@@ -238,9 +242,10 @@ CursorDesk/
 │   ├── agent_bridge.py           ← CDP agent bridge
 │   ├── cdp_extract.js            ← in-page state extractor
 │   ├── file_browser.py           ← Files tab API
+│   ├── capture_screenshots.py    ← regenerate README screenshots locally
 │   ├── requirements.txt
 │   └── web/                      ← phone UI (HTML/CSS/JS)
-├── docs/screenshots/
+├── docs/screenshots/             ← real UI captures (sanitized sample data)
 ├── iOS/                          ← optional native shell (not required)
 ├── LICENSE
 └── README.md
