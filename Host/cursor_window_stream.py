@@ -530,8 +530,11 @@ def health() -> dict:
 
 
 @app.get("/api/agent-image", response_model=None)
-async def agent_image(src: str):
-    result = await AGENT.fetch_image(src)
+async def agent_image(src: str = "", path: str = ""):
+    if path:
+        result = await AGENT.fetch_local_image(path)
+    else:
+        result = await AGENT.fetch_image(src)
     if not result.get("ok"):
         return JSONResponse(
             {"ok": False, "error": result.get("error") or "image unavailable"},

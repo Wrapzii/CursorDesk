@@ -10,7 +10,9 @@ import urllib.error
 import urllib.request
 from typing import Any, Optional
 
+import file_browser
 import websockets
+from image_resolver import allowed_image_paths, enrich_state_images, normalize_path
 from websockets.protocol import State
 
 CDP_BASE = os.environ.get("CURSORDESK_CDP", "http://127.0.0.1:9222").rstrip("/")
@@ -430,9 +432,13 @@ class AgentHub:
             "usageStats": dict(self.usage_stats),
             "updatedAt": time.time(),
         }
+        enrich_state_images(self.state)
         fp = json.dumps(
             {
-                "m": [(m.get("id"), m.get("text", "")[:80]) for m in self.state.get("messages") or []],
+                "m": [
+                    (m.get("id"), m.get("text", "")[:80], len(m.get("images") or []))
+                    for m in self.state.get("messages") or []
+                ],
                 "a": self.state.get("approvals"),
                 "t": [
                     (t.get("id"), t.get("title"), t.get("active"), t.get("working"))
@@ -603,6 +609,26 @@ class AgentHub:
             await self.refresh_state()
             return {"ok": True}
 
+    async def fetch_local_image(self, path: str) -> dict:
+        import base64
+
+        path = normalize_path(path)
+        allowed = allowed_image_paths(self.state)
+        if not path or path not in allowed:
+            return {"ok": False, "error": "image is not in the current chat"}
+        resolved, err = file_browser.file_response_path(path)
+        if err or resolved is None:
+            return {"ok": False, "error": err or "file not allowed"}
+        try:
+            data = base64.b64encode(resolved.read_bytes()).decode("ascii")
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        return {
+            "ok": True,
+            "mime": file_browser.guess_media_type(resolved),
+            "data": data,
+        }
+
     async def fetch_image(self, src: str) -> dict:
         src = str(src or "")
         allowed = {
@@ -610,8 +636,16 @@ class AgentHub:
             for message in self.state.get("messages") or []
             for image in message.get("images") or []
         }
-        if not src or src not in allowed:
+        local_allowed = {
+            f"local:{path}" for path in allowed_image_paths(self.state)
+        }
+        if not src or (src not in allowed and src not in local_allowed):
             return {"ok": False, "error": "image is not in the current chat"}
+        if src.startswith("local:"):
+            return await self.fetch_local_image(src[6:])
+        local = normalize_path(src)
+        if local and local in allowed_image_paths(self.state):
+            return await self.fetch_local_image(local)
         async with self._cmd_lock:
             if not await self.ensure_connected():
                 return {"ok": False, "error": self.state.get("error") or "no cdp"}

@@ -77,10 +77,35 @@
       }
     } catch (e) {}
   }
-  function agentImageUrl(src) {
-    src = String(src || '');
+  function agentImageUrl(image) {
+    const path = String(image?.path || '').trim();
+    const src = String(image?.src || '').trim();
+    if (path) return `/api/agent-image?path=${encodeURIComponent(path)}`;
+    if (src.startsWith('local:')) return `/api/agent-image?path=${encodeURIComponent(src.slice(6))}`;
     if (/^data:image\//i.test(src) || /^https?:\/\//i.test(src)) return src;
+    if (/\.(png|jpe?g|webp|gif|bmp)(\?|$)/i.test(src) || /^[A-Za-z]:\\/.test(src) || src.startsWith('/'))
+      return `/api/agent-image?path=${encodeURIComponent(src)}`;
     return `/api/agent-image?src=${encodeURIComponent(src)}`;
+  }
+  function openImagePreview(url, label) {
+    previewPath = null;
+    preview.classList.add('show');
+    previewImg.style.display = 'block';
+    previewText.style.display = 'none';
+    previewImg.src = url;
+    document.getElementById('previewExplorer').style.display = 'none';
+    document.getElementById('previewOpenPc').style.display = 'none';
+    const closeBtn = document.getElementById('previewClose');
+    closeBtn.textContent = label ? `Close · ${label}` : 'Close';
+  }
+  function bindMessageImages(root) {
+    root.querySelectorAll('.msgImages img').forEach((img) => {
+      img.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openImagePreview(img.src, img.alt || 'Image');
+      };
+    });
   }
   function renderPendingImages() {
     attachmentTray.innerHTML = pendingImages.map((image, index) =>
@@ -462,14 +487,15 @@
       const editable = m.editable || m.type === 'human' ? ' data-edit="1"' : '';
       const mid = escapeHtml(m.messageId || m.id || '');
       const images = (m.images || []).map((image) => {
-        const src = agentImageUrl(image.src);
-        return `<a href="${escapeHtml(src)}" target="_blank" rel="noopener"><img src="${escapeHtml(src)}" alt="${escapeHtml(image.alt || 'Agent image')}" loading="lazy"/></a>`;
+        const src = agentImageUrl(image);
+        return `<button type="button" class="msgImageBtn" data-img="${escapeHtml(src)}"><img src="${escapeHtml(src)}" alt="${escapeHtml(image.alt || 'Agent image')}" loading="lazy"/></button>`;
       }).join('');
       const gallery = images ? `<div class="msgImages">${images}</div>` : '';
       const ago = m.ago ? `<div class="msgTime">${escapeHtml(m.ago)}</div>` : '';
       return `<div class="msg ${cls}" data-mid="${mid}"${editable}>${roleHtml}<div class="body">${escapeHtml(m.text)}</div>${gallery}${ago}</div>`;
     }).join('') || '<div class="msg"><div class="body" style="opacity:.5">No messages yet. Open a chat from ☰ or tap + Agent.</div></div>';
     if (nearBottom) chatLog.scrollTop = chatLog.scrollHeight;
+    bindMessageImages(chatLog);
     chatLog.querySelectorAll('.msg[data-edit="1"]').forEach((el) => {
       el.onclick = () => {
         editMsgId = el.dataset.mid || '';
@@ -864,7 +890,12 @@
     await fetch('/api/explorer', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({path: filesPath || ''})});
   };
   rootSel.onchange = () => loadFiles(rootSel.value);
-  document.getElementById('previewClose').onclick = () => preview.classList.remove('show');
+  document.getElementById('previewClose').onclick = () => {
+    preview.classList.remove('show');
+    document.getElementById('previewExplorer').style.display = '';
+    document.getElementById('previewOpenPc').style.display = '';
+    document.getElementById('previewClose').textContent = 'Close';
+  };
   document.getElementById('previewExplorer').onclick = async () => {
     await fetch('/api/explorer', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({path: previewPath || ''})});
   };

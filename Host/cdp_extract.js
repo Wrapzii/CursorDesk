@@ -282,15 +282,23 @@
       el.getAttribute("data-message-id") ||
       el.getAttribute("data-server-bubble-id") ||
       idx;
-    const images = Array.from(el.querySelectorAll("img"))
-      .map((img, imageIndex) => {
-        const rect = img.getBoundingClientRect();
-        const src = img.currentSrc || img.src || "";
-        if (!src || (rect.width < 48 && rect.height < 48)) return null;
+    const images = Array.from(el.querySelectorAll("img, a[href*='.png'], a[href*='.jpg'], a[href*='.jpeg'], a[href*='.webp']"))
+      .map((node, imageIndex) => {
+        const img = node.tagName === "IMG" ? node : node.querySelector("img");
+        const href = node.tagName === "A" ? node.href || node.getAttribute("href") || "" : "";
+        const rect = (img || node).getBoundingClientRect();
+        const src =
+          (img && (img.currentSrc || img.src || img.getAttribute("data-src"))) ||
+          href ||
+          "";
+        const alt = (img && img.alt) || node.getAttribute("aria-label") || "";
+        if (!src && !alt) return null;
+        if (img && rect.width < 24 && rect.height < 24 && !/\.(png|jpe?g|webp|gif|bmp)/i.test(src + alt))
+          return null;
         return {
           id: `${String(msgId || idx || messages.length)}-${imageIndex}`,
-          src,
-          alt: img.alt || "Agent image",
+          src: src || alt,
+          alt: alt || "Agent image",
         };
       })
       .filter((image) => image && !/^data:image\/svg\+xml/i.test(image.src))
