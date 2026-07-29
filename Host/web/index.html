@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="theme-color" content="#0b0f0d"/>
+<title>CursorDesk</title>
+<link rel="stylesheet" href="/app.css"/>
+</head>
+<body>
+  <div id="top">
+    <div class="left">
+      <button id="chatsBtn" type="button" class="iconBtn" title="Chats">☰</button>
+      <div>
+        <div class="brand">CURSORDESK</div>
+        <div class="meta" id="meta">connecting…</div>
+      </div>
+    </div>
+    <div class="right">
+      <span id="sessionPill" class="sessionPill">Local</span>
+      <button id="newAgentBtn" type="button">+ Agent</button>
+      <button id="qualityBtn" type="button" style="display:none">Sharp</button>
+      <button id="rmbBtn" type="button" style="display:none">R-click</button>
+      <button id="cropBtn" type="button" style="display:none">Full</button>
+      <button id="reconnectBtn" type="button">Reconnect</button>
+    </div>
+  </div>
+
+  <div id="drawer">
+    <div class="drawerHead">
+      <div>
+        <div class="drawerTitle">Agents</div>
+        <div class="drawerSub" id="drawerSub">CDP</div>
+      </div>
+      <button id="drawerClose" type="button">Close</button>
+    </div>
+    <button id="drawerNew" type="button" class="newRow">+ New Agent</button>
+    <div id="repoList"></div>
+    <div class="drawerSection">Windows</div>
+    <div id="winList"></div>
+  </div>
+  <div id="scrim"></div>
+
+  <div id="sheet" class="sheet">
+    <div class="sheetHead">
+      <div class="sheetTitle" id="sheetTitle">Models</div>
+      <button id="sheetClose" type="button">Close</button>
+    </div>
+    <div id="sheetBody"></div>
+  </div>
+
+  <div id="editModal" class="sheet">
+    <div class="sheetHead">
+      <div class="sheetTitle">Edit message</div>
+      <button id="editClose" type="button">Close</button>
+    </div>
+    <textarea id="editText" rows="6" placeholder="Edit and resend…"></textarea>
+    <button id="editSend" type="button" class="primaryBtn">Resend</button>
+  </div>
+
+  <div id="toast"></div>
+
+  <div id="shell" class="agent-mode">
+    <div id="agent">
+      <div id="agentBanner"></div>
+      <div id="controls">
+        <div id="modeRow">
+          <button type="button" data-mode="agent">Agent</button>
+          <button type="button" data-mode="plan">Plan</button>
+          <button type="button" data-mode="ask">Ask</button>
+          <button type="button" data-mode="debug">Debug</button>
+          <button type="button" data-mode="multitask">Multi</button>
+        </div>
+        <button id="modelBtn" type="button">Auto ▾</button>
+        <button id="usageBtn" type="button" title="Usage">Usage</button>
+      </div>
+      <div id="liveStatus"></div>
+      <div id="usageBar"></div>
+      <div id="approvals">
+        <button id="approveBtn" type="button">Accept</button>
+        <button id="rejectBtn" type="button">Reject</button>
+      </div>
+      <div id="queueBox" class="panelBox">
+        <div class="panelTitle">Queue</div>
+        <div id="queueList"></div>
+      </div>
+      <div id="chatWrap">
+        <div id="chatLog"></div>
+        <div id="chatRunner"></div>
+      </div>
+    </div>
+
+    <div id="desktop">
+      <div id="adjust">
+        <button id="widerBtn" type="button">Sidebar+</button>
+        <button id="narrowBtn" type="button">Sidebar-</button>
+      </div>
+      <canvas id="frame" width="780" height="1400"></canvas>
+      <div id="zoomHint">pinch zoom · two-finger pan · double-tap reset</div>
+    </div>
+
+    <div id="files">
+      <div id="filesHead">
+        <select id="rootSel"></select>
+        <button id="upBtn" type="button">Up</button>
+        <button id="explorerBtn" type="button">Explorer</button>
+        <button id="refreshFilesBtn" type="button">Reload</button>
+        <div id="filesPath"></div>
+      </div>
+      <div id="filesList"></div>
+      <div id="preview">
+        <img id="previewImg" alt="preview"/>
+        <pre id="previewText"></pre>
+        <div id="previewBar">
+          <button id="previewClose" type="button">Close</button>
+          <button id="previewExplorer" class="primary" type="button">Show in Explorer</button>
+          <button id="previewOpenPc" type="button">Open on PC</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="dock">
+      <button id="attachBtn" type="button" title="Add pictures">📷 Image</button>
+      <input id="imageInput" type="file" accept="image/*" multiple hidden/>
+      <div id="attachmentTray"></div>
+      <textarea id="text" rows="1" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="Message agent…"></textarea>
+      <button id="sendBtn" type="button">Send</button>
+    </div>
+  </div>
+
+  <div id="tabs">
+    <button id="tabAgent" class="active" type="button"><span class="icon">✦</span>Agent</button>
+    <button id="tabDesktop" type="button"><span class="icon">▣</span>Desktop</button>
+    <button id="tabFiles" type="button"><span class="icon">📁</span>Files</button>
+  </div>
+
+<script src="/app.js"></script>
+</body>
+</html>
