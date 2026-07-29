@@ -1,4 +1,4 @@
-:root { color-scheme: dark; --bar: 52px; --dock: 52px; --tabs: 56px; --green: #73f2b8; --bg: #070a08; --panel: #0b110e; }
+:root { color-scheme: dark; --bar: 52px; --composer-h: 52px; --tabs: 56px; --green: #73f2b8; --bg: #070a08; --panel: #0b110e; }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body {
   margin: 0; height: 100%; background: var(--bg); color: #e8fff4;
@@ -64,9 +64,10 @@ html, body {
   bottom: calc(var(--tabs) + env(safe-area-inset-bottom));
   display: flex; flex-direction: column; background: var(--bg);
 }
-#shell.agent-mode { bottom: calc(var(--tabs) + var(--dock) + env(safe-area-inset-bottom)); }
+body.show-dock #shell {
+  bottom: calc(var(--tabs) + var(--composer-h) + env(safe-area-inset-bottom) + var(--vv-inset, 0px));
+}
 #shell.desktop-mode { touch-action: none; }
-#shell.desktop-mode.chat-dock { bottom: calc(var(--tabs) + var(--dock) + env(safe-area-inset-bottom)); }
 
 #agent {
   display: none; flex: 1; min-height: 0; flex-direction: column; background: var(--panel);
@@ -90,7 +91,7 @@ html, body {
 #chatWrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #chatLog {
   flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch;
-  padding: 2px 10px 8px; touch-action: pan-y;
+  padding: 2px 10px 8px; touch-action: pan-y; overflow-anchor: none;
 }
 #chatRunner {
   display: none; flex: 0 0 auto; align-items: flex-start; gap: 7px;
@@ -140,7 +141,30 @@ html, body {
   display: block; width: 100%; max-height: 360px; object-fit: contain;
   border-radius: 10px; background: #020403; border: 1px solid rgba(255,255,255,.09);
 }
+.msgImages .msgImageBtn.broken img { display: none; }
+.msgImages .msgImageBtn .brokenLabel { display: none; }
+.msgImages .msgImageBtn.broken .brokenLabel {
+  display: flex; align-items: center; justify-content: center; min-height: 88px;
+  color: rgba(255,255,255,.45); font-size: 11px; border-radius: 10px;
+  border: 1px dashed rgba(255,255,255,.14); background: rgba(255,255,255,.03);
+}
 .msgImages .msgImageBtn:active img { border-color: rgba(115,242,184,.45); }
+
+#agentImagePreview {
+  display: none; position: fixed; inset: 0; z-index: 70;
+  background: rgba(0,0,0,.94); flex-direction: column; touch-action: manipulation;
+}
+#agentImagePreview.show { display: flex; }
+#agentImagePreviewClose {
+  position: absolute; top: max(10px, env(safe-area-inset-top)); right: 10px; z-index: 2;
+  width: 44px; height: 44px; border: 0; border-radius: 999px;
+  background: rgba(255,255,255,.14); color: #fff; font-size: 30px; line-height: 1;
+  font-weight: 300; cursor: pointer;
+}
+#agentImagePreviewImg {
+  flex: 1; width: 100%; max-height: 100%; object-fit: contain;
+  padding: 52px 8px 16px; margin: auto;
+}
 
 #desktop {
   display: none; flex: 1; min-height: 0; position: relative; overflow: hidden;
@@ -216,30 +240,38 @@ canvas#frame {
 
 #dock {
   display: none; gap: 6px; align-items: flex-end;
-  position: relative;
+  position: fixed; left: 0; right: 0; z-index: 21;
+  bottom: calc(var(--tabs) + env(safe-area-inset-bottom) + var(--vv-inset, 0px));
   padding: 6px 8px; background: rgba(8,12,10,.96);
   border-top: 1px solid rgba(255,255,255,.06);
 }
-#shell.agent-mode #dock,
-#shell.desktop-mode.chat-dock #dock { display: flex; }
+body.show-dock #dock { display: flex; }
+#dockActions {
+  display: flex; flex-direction: column; gap: 5px; flex: 0 0 auto;
+}
 #dock textarea {
-  flex: 1; min-height: 38px; max-height: 132px; border-radius: 12px;
+  flex: 1; min-width: 0; min-height: 38px; max-height: 108px; border-radius: 12px;
   border: 1px solid rgba(255,255,255,.12); resize: none; overflow-y: auto;
   background: #151c18; color: #e8fff4; padding: 9px 11px; font-size: 16px;
   line-height: 1.35; font-family: inherit;
 }
-#dock textarea.long { font-size: 14px; }
-#dock textarea.very-long { font-size: 13px; }
-#dock button {
-  border: 0; border-radius: 12px; min-width: 58px; height: 38px;
-  background: var(--green); color: #07120c; font-weight: 800; font-size: 13px;
+#dock textarea.compact {
+  font-size: 13px; line-height: 1.32; max-height: 156px;
+}
+#dock #dockActions button {
+  border: 0; border-radius: 12px; width: 52px; min-width: 52px;
+  font-weight: 800; font-size: 13px;
+}
+#dock #sendBtn {
+  height: 38px; background: var(--green); color: #07120c;
 }
 #dock #attachBtn {
-  min-width: 64px; width: 64px; height: 38px; padding: 0 6px; font-size: 11px;
+  height: 34px; padding: 0; font-size: 17px; line-height: 1;
   background: rgba(255,255,255,.09); color: #e8fff4;
 }
 #attachmentTray {
-  display: none; position: absolute; left: 8px; right: 8px; bottom: calc(var(--dock) - 6px);
+  display: none; position: absolute; left: 8px; right: 8px; bottom: 100%;
+  margin-bottom: 6px;
   gap: 7px; padding: 8px; overflow-x: auto; border-radius: 12px;
   background: rgba(8,12,10,.97); border: 1px solid rgba(255,255,255,.09);
 }

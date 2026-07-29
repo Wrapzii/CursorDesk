@@ -282,6 +282,8 @@ class AgentHub:
         self._was_loading = False
         self._selected_tab_id = ""
         self._selected_tab_title = ""
+        self._last_tab_resync = 0.0
+        self._resyncing_tab = False
         self.usage_stats: dict[str, Any] = {
             "prompts": 0,
             "approvals": 0,
@@ -378,10 +380,39 @@ class AgentHub:
             return False
         return True
 
+    async def _ensure_selected_tab_visible(self) -> None:
+        if self._resyncing_tab or not self._selected_tab_id or not self.client.connected:
+            return
+        now = time.time()
+        if now - self._last_tab_resync < 4.0:
+            return
+        tab_id = json.dumps(self._selected_tab_id)
+        check = await self.client.evaluate(
+            f"""(() => {{
+  const id = {tab_id};
+  let el = document.getElementById(id);
+  if (!el && id.startsWith('index:')) {{
+    const index = Number(id.slice(6));
+    el = document.querySelectorAll('.glass-sidebar-agent-menu-btn')[index] || null;
+  }}
+  if (!el) return {{ ok: false }};
+  const cls = (el.className || '').toString();
+  const active =
+    el.getAttribute('aria-selected') === 'true' ||
+    /selected|active|aria-selected=\\"true\\"|data-state=\\"active\\"/i.test(cls) ||
+    !!el.closest('[aria-selected="true"], [data-state="active"], .selected');
+  return {{ ok: true, active }};
+}})()"""
+        )
+        if check and check.get("ok") and not check.get("active"):
+            self._last_tab_resync = now
+            await self.select_tab(self._selected_tab_id)
+
     async def refresh_state(self) -> dict:
         if not await self.ensure_connected():
             await self._broadcast({"type": "state", "state": self.state})
             return self.state
+        await self._ensure_selected_tab_visible()
         try:
             extracted = await self.client.evaluate(EXTRACT_JS, timeout=6.0)
         except Exception as exc:
@@ -436,7 +467,12 @@ class AgentHub:
         fp = json.dumps(
             {
                 "m": [
-                    (m.get("id"), m.get("text", "")[:80], len(m.get("images") or []))
+                    (
+                        m.get("id"),
+                        m.get("text", "")[:80],
+                        len(m.get("images") or []),
+                        [str(i.get("path") or i.get("src") or "")[:120] for i in (m.get("images") or [])[:6]],
+                    )
                     for m in self.state.get("messages") or []
                 ],
                 "a": self.state.get("approvals"),
@@ -611,14 +647,19 @@ class AgentHub:
 
     async def fetch_local_image(self, path: str) -> dict:
         import base64
+        from pathlib import Path
 
         path = normalize_path(path)
         allowed = allowed_image_paths(self.state)
         if not path or path not in allowed:
             return {"ok": False, "error": "image is not in the current chat"}
         resolved, err = file_browser.file_response_path(path)
-        if err or resolved is None:
-            return {"ok": False, "error": err or "file not allowed"}
+        if resolved is None:
+            # Chat-referenced paths may sit outside default browse roots (e.g. C:\FXShots).
+            candidate = Path(path)
+            if not candidate.is_file():
+                return {"ok": False, "error": err or "file not found"}
+            resolved = candidate.resolve()
         try:
             data = base64.b64encode(resolved.read_bytes()).decode("ascii")
         except Exception as exc:
@@ -732,6 +773,13 @@ class AgentHub:
             return {"ok": False, "error": "New Agent control not found — open Agents window in Cursor"}
 
     async def select_tab(self, tab_id: str) -> dict:
+        self._resyncing_tab = True
+        try:
+            return await self._select_tab_impl(tab_id)
+        finally:
+            self._resyncing_tab = False
+
+    async def _select_tab_impl(self, tab_id: str) -> dict:
         async with self._cmd_lock:
             if not await self.ensure_connected():
                 return {"ok": False, "error": self.state.get("error") or "no cdp"}

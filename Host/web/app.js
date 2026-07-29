@@ -15,6 +15,8 @@
   let editMsgId = null;
   let modelCache = [];
   let pendingImages = [];
+  let chatPinnedBottom = true;
+  let lastChatRenderKey = '';
 
   const canvas = document.getElementById('frame');
   const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
@@ -23,6 +25,8 @@
   const meta = document.getElementById('meta');
   const text = document.getElementById('text');
   const imageInput = document.getElementById('imageInput');
+  let composerFocused = false;
+  const dock = document.getElementById('dock');
   const attachmentTray = document.getElementById('attachmentTray');
   const chatLog = document.getElementById('chatLog');
   const agentBanner = document.getElementById('agentBanner');
@@ -33,6 +37,9 @@
   const preview = document.getElementById('preview');
   const previewImg = document.getElementById('previewImg');
   const previewText = document.getElementById('previewText');
+  const agentImagePreview = document.getElementById('agentImagePreview');
+  const agentImagePreviewImg = document.getElementById('agentImagePreviewImg');
+  const agentImagePreviewClose = document.getElementById('agentImagePreviewClose');
   const drawer = document.getElementById('drawer');
   const scrim = document.getElementById('scrim');
   const repoList = document.getElementById('repoList');
@@ -89,21 +96,87 @@
   }
   function openImagePreview(url, label) {
     previewPath = null;
-    preview.classList.add('show');
-    previewImg.style.display = 'block';
-    previewText.style.display = 'none';
-    previewImg.src = url;
-    document.getElementById('previewExplorer').style.display = 'none';
-    document.getElementById('previewOpenPc').style.display = 'none';
-    const closeBtn = document.getElementById('previewClose');
-    closeBtn.textContent = label ? `Close · ${label}` : 'Close';
+    agentImagePreviewImg.src = url;
+    agentImagePreviewImg.alt = label || 'Image';
+    agentImagePreview.classList.add('show');
+    agentImagePreview.setAttribute('aria-hidden', 'false');
+  }
+  function closeImagePreview() {
+    agentImagePreview.classList.remove('show');
+    agentImagePreview.setAttribute('aria-hidden', 'true');
+    agentImagePreviewImg.removeAttribute('src');
+  }
+  function updateChatPinned() {
+    chatPinnedBottom = chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight < 96;
+  }
+  function messageRenderKey(msgs) {
+    return (msgs || []).map((m) => JSON.stringify({
+      id: m.id || m.messageId || '',
+      type: m.type || m.role || '',
+      text: m.text || '',
+      ago: m.ago || '',
+      images: (m.images || []).map((i) => i.path || i.src || ''),
+    })).join('\n');
+  }
+  function scrollChatToEnd() {
+    chatLog.scrollTop = chatLog.scrollHeight;
+    chatPinnedBottom = true;
   }
   function bindMessageImages(root) {
-    root.querySelectorAll('.msgImages img').forEach((img) => {
-      img.onclick = (e) => {
+    root.querySelectorAll('.msgImageBtn').forEach((btn) => {
+      if (btn.dataset.bound === '1') return;
+      btn.dataset.bound = '1';
+      const img = btn.querySelector('img');
+      if (img) {
+        img.removeAttribute('loading');
+        img.addEventListener('load', () => {
+          if (chatPinnedBottom) scrollChatToEnd();
+        }, { once: true });
+      }
+      btn.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
-        openImagePreview(img.src, img.alt || 'Image');
+        const url = btn.dataset.img || img?.src;
+        if (!url || btn.classList.contains('broken')) return;
+        openImagePreview(url, img?.alt || 'Image');
+      };
+    });
+  }
+  function renderChatMessages(msgs) {
+    const renderKey = messageRenderKey(msgs);
+    const preserveScroll = !chatPinnedBottom;
+    const prevTop = chatLog.scrollTop;
+    if (renderKey === lastChatRenderKey && chatLog.childElementCount > 0) {
+      bindMessageImages(chatLog);
+      return;
+    }
+    lastChatRenderKey = renderKey;
+    chatLog.innerHTML = (msgs || []).map((m) => {
+      if (m.type === 'footnote') {
+        return `<div class="msgFoot">${escapeHtml(m.text)}</div>`;
+      }
+      const cls = escapeHtml(m.type || m.role || 'message');
+      const role = messageRoleLabel(m);
+      const roleHtml = role ? `<div class="role">${escapeHtml(role)}</div>` : '';
+      const editable = m.editable || m.type === 'human' ? ' data-edit="1"' : '';
+      const mid = escapeHtml(m.messageId || m.id || '');
+      const images = (m.images || []).map((image) => {
+        const src = agentImageUrl(image);
+        return `<button type="button" class="msgImageBtn" data-img="${escapeHtml(src)}"><img src="${escapeHtml(src)}" alt="${escapeHtml(image.alt || 'Agent image')}" onerror="this.closest('.msgImageBtn')?.classList.add('broken')"/><span class="brokenLabel">Image unavailable</span></button>`;
+      }).join('');
+      const gallery = images ? `<div class="msgImages">${images}</div>` : '';
+      const ago = m.ago ? `<div class="msgTime">${escapeHtml(m.ago)}</div>` : '';
+      return `<div class="msg ${cls}" data-mid="${mid}"${editable}>${roleHtml}${gallery}<div class="body">${escapeHtml(m.text)}</div>${ago}</div>`;
+    }).join('') || '<div class="msg"><div class="body" style="opacity:.5">No messages yet. Open a chat from ☰ or tap + Agent.</div></div>';
+    if (preserveScroll) chatLog.scrollTop = prevTop;
+    else scrollChatToEnd();
+    bindMessageImages(chatLog);
+    chatLog.querySelectorAll('.msg[data-edit="1"]').forEach((el) => {
+      el.onclick = () => {
+        editMsgId = el.dataset.mid || '';
+        editText.value = el.querySelector('.body')?.textContent || '';
+        sheet.classList.remove('open');
+        editModal.classList.add('open');
       };
     });
   }
@@ -199,6 +272,7 @@
     }
     if (tab === 'files') loadFiles(filesPath);
     if (tab === 'agent') renderAgent(agentState);
+    updateDockVisibility();
   }
 
   function cycleCrop() {
@@ -212,6 +286,7 @@
       (crop === 'chat' || crop === 'side') ? 'flex' : 'none';
     if (crop !== 'full') resetView();
     layoutCanvas();
+    updateDockVisibility();
   }
 
   function clampPan() {
@@ -274,16 +349,40 @@
 
   function resizeComposer() {
     if (!text) return;
-    text.classList.remove('long', 'very-long');
-    const len = text.value.length;
     const lines = text.value.split('\n').length;
-    if (len > 220 || lines > 6) text.classList.add('very-long');
-    else if (len > 90 || lines > 3) text.classList.add('long');
+    const compact = lines >= 4 || text.value.length > 96;
+    text.classList.toggle('compact', compact);
     text.style.height = 'auto';
-    const h = Math.min(text.scrollHeight, 132);
+    const maxH = compact ? 156 : 108;
+    const h = Math.min(text.scrollHeight, maxH);
     text.style.height = h + 'px';
-    const tray = attachmentTray.classList.contains('show') ? 72 : 0;
-    document.documentElement.style.setProperty('--dock', (h + 12 + tray) + 'px');
+    syncComposerLayout();
+  }
+
+  function syncComposerLayout() {
+    if (!dock) return;
+    const h = Math.ceil(dock.getBoundingClientRect().height);
+    document.documentElement.style.setProperty('--composer-h', h + 'px');
+  }
+
+  function updateDockVisibility() {
+    const show = tab === 'agent' || (tab === 'desktop' && crop === 'chat');
+    document.body.classList.toggle('show-dock', show);
+    syncComposerLayout();
+  }
+
+  function syncVisualViewport() {
+    const vv = window.visualViewport;
+    if (!vv || !composerFocused) {
+      document.documentElement.style.setProperty('--vv-inset', '0px');
+      syncComposerLayout();
+      return;
+    }
+    const raw = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+    const maxInset = Math.round(window.innerHeight * 0.52);
+    const inset = Math.min(raw, maxInset);
+    document.documentElement.style.setProperty('--vv-inset', inset + 'px');
+    syncComposerLayout();
   }
 
   const CHAT_NOISE = new Set(['thinking', 'work', 'subagent', 'running', 'tool', 'activity']);
@@ -384,6 +483,8 @@
         repoList.querySelectorAll('button[data-id]').forEach((row) => row.classList.remove('active'));
         btn.classList.add('active');
         chatLog.innerHTML = '<div class="msg"><div class="body" style="opacity:.55">Loading conversation…</div></div>';
+        lastChatRenderKey = '';
+        chatPinnedBottom = true;
         meta.textContent = `opening ${btn.firstChild?.textContent || 'conversation'}…`;
         agentSend({ type: 'select_tab', id: btn.dataset.id });
         openDrawer(false);
@@ -476,34 +577,7 @@
     renderRepos(state);
 
     const msgs = normalizeMessages(state.messages, !!state.loading);
-    const nearBottom = chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight < 80;
-    chatLog.innerHTML = msgs.map((m) => {
-      if (m.type === 'footnote') {
-        return `<div class="msgFoot">${escapeHtml(m.text)}</div>`;
-      }
-      const cls = escapeHtml(m.type || m.role || 'message');
-      const role = messageRoleLabel(m);
-      const roleHtml = role ? `<div class="role">${escapeHtml(role)}</div>` : '';
-      const editable = m.editable || m.type === 'human' ? ' data-edit="1"' : '';
-      const mid = escapeHtml(m.messageId || m.id || '');
-      const images = (m.images || []).map((image) => {
-        const src = agentImageUrl(image);
-        return `<button type="button" class="msgImageBtn" data-img="${escapeHtml(src)}"><img src="${escapeHtml(src)}" alt="${escapeHtml(image.alt || 'Agent image')}" loading="lazy"/></button>`;
-      }).join('');
-      const gallery = images ? `<div class="msgImages">${images}</div>` : '';
-      const ago = m.ago ? `<div class="msgTime">${escapeHtml(m.ago)}</div>` : '';
-      return `<div class="msg ${cls}" data-mid="${mid}"${editable}>${roleHtml}<div class="body">${escapeHtml(m.text)}</div>${gallery}${ago}</div>`;
-    }).join('') || '<div class="msg"><div class="body" style="opacity:.5">No messages yet. Open a chat from ☰ or tap + Agent.</div></div>';
-    if (nearBottom) chatLog.scrollTop = chatLog.scrollHeight;
-    bindMessageImages(chatLog);
-    chatLog.querySelectorAll('.msg[data-edit="1"]').forEach((el) => {
-      el.onclick = () => {
-        editMsgId = el.dataset.mid || '';
-        editText.value = el.querySelector('.body')?.textContent || '';
-        sheet.classList.remove('open');
-        editModal.classList.add('open');
-      };
-    });
+    renderChatMessages(msgs);
 
     if (tab === 'agent') {
       const active = (state.tabs || []).find((t) => t.active);
@@ -816,6 +890,7 @@
     resizeComposer();
   }
 
+  chatLog.addEventListener('scroll', updateChatPinned, { passive: true });
   document.getElementById('tabAgent').onclick = () => setTab('agent');
   document.getElementById('tabDesktop').onclick = () => setTab('desktop');
   document.getElementById('tabFiles').onclick = () => setTab('files');
@@ -831,6 +906,15 @@
   document.getElementById('attachBtn').onclick = () => imageInput.click();
   imageInput.onchange = () => addPictures(imageInput.files).catch(() => showToast('Could not read picture'));
   text.addEventListener('input', resizeComposer);
+  text.addEventListener('focus', () => {
+    composerFocused = true;
+    syncVisualViewport();
+    setTimeout(syncVisualViewport, 120);
+  });
+  text.addEventListener('blur', () => {
+    composerFocused = false;
+    setTimeout(syncVisualViewport, 80);
+  });
   text.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }
   });
@@ -896,6 +980,13 @@
     document.getElementById('previewOpenPc').style.display = '';
     document.getElementById('previewClose').textContent = 'Close';
   };
+  agentImagePreviewClose.onclick = (e) => {
+    e.stopPropagation();
+    closeImagePreview();
+  };
+  agentImagePreview.onclick = (e) => {
+    if (e.target === agentImagePreview) closeImagePreview();
+  };
   document.getElementById('previewExplorer').onclick = async () => {
     await fetch('/api/explorer', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({path: previewPath || ''})});
   };
@@ -904,7 +995,14 @@
   };
 
   window.addEventListener('resize', layoutCanvas);
+  window.visualViewport?.addEventListener('resize', syncVisualViewport);
+  window.visualViewport?.addEventListener('scroll', syncVisualViewport);
+  if (dock && typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(syncComposerLayout).observe(dock);
+  }
   resizeComposer();
+  updateDockVisibility();
+  syncVisualViewport();
   setTab('agent');
   connectAgent();
 })();
