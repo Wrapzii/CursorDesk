@@ -252,6 +252,39 @@
     }
   }
 
+  // Identity of the transcript actually mounted in Cursor. This must come
+  // from the focused chat surface, never from the phone's intended selection.
+  const focusedTitleEl = findFirst([
+    "span.auxiliary-bar-chat-title",
+    "[class*='auxiliary-bar-chat-title']",
+  ]);
+  const focusedTitle = focusedTitleEl
+    ? esc(
+        focusedTitleEl.getAttribute("title") ||
+          focusedTitleEl.innerText ||
+          focusedTitleEl.textContent ||
+          ""
+      )
+    : "";
+  const normalizeConversationTitle = (value) =>
+    esc(value)
+      .replace(/\s+(\d+\s*[smhdw]\s+ago|\d+\s+[smhdw]\s+ago|just now|now)$/i, "")
+      .trim()
+      .toLowerCase();
+  const normalizedFocusedTitle = normalizeConversationTitle(focusedTitle);
+  const focusedTab =
+    tabs.find((tab) => tab.active) ||
+    tabs.find(
+      (tab) =>
+        normalizedFocusedTitle &&
+        normalizeConversationTitle(tab.title) === normalizedFocusedTitle
+    ) ||
+    null;
+  const focusedConversation = {
+    id: focusedTab ? String(focusedTab.id || "") : "",
+    title: focusedTitle || (focusedTab ? focusedTab.title : "") || "",
+  };
+
   // ---- messages + activity (thinking / work / subagents) ----
   const wrappers = Array.from(
     document.querySelectorAll(
@@ -270,7 +303,7 @@
 
   const messages = [];
   const activity = [];
-  for (const el of top.slice(-100)) {
+  for (const el of top.slice(-320)) {
     const role = el.getAttribute("data-message-role") || "";
     const kind = el.getAttribute("data-message-kind") || "";
     const idx =
@@ -282,7 +315,7 @@
       el.getAttribute("data-message-id") ||
       el.getAttribute("data-server-bubble-id") ||
       idx;
-    const images = Array.from(el.querySelectorAll("img, a[href*='.png'], a[href*='.jpg'], a[href*='.jpeg'], a[href*='.webp']"))
+    const images = Array.from(el.querySelectorAll("img, a[href*='.png'], a[href*='.jpg'], a[href*='.jpeg'], a[href*='.webp'], a[href*='.gif']"))
       .map((node, imageIndex) => {
         const img = node.tagName === "IMG" ? node : node.querySelector("img");
         const href = node.tagName === "A" ? node.href || node.getAttribute("href") || "" : "";
@@ -406,6 +439,162 @@
     });
   }
 
+  // ---- subagents ----
+  // Step-group headers remain mounted when collapsed; detail cards do not.
+  // Never move the virtualized transcript to discover more data.
+  let subagents = {
+    conversation: focusedConversation,
+    groups: [],
+    agents: [],
+    total: 0,
+    running: 0,
+    completed: 0,
+    error: 0,
+  };
+  try {
+    const parser = globalThis.CursorDeskSubagentParser;
+    const scrollRoot = document.querySelector(
+      ".virtualized-composer-messages-scroll-container"
+    );
+    const nearLiveTail =
+      !scrollRoot ||
+      scrollRoot.scrollHeight - scrollRoot.clientHeight - scrollRoot.scrollTop <=
+        Math.max(160, scrollRoot.clientHeight * 0.35);
+    const notificationRows = Array.from(
+      document.querySelectorAll(".agent-transcript-row-notification")
+    );
+    const lastNotification = notificationRows[notificationRows.length - 1] || null;
+    const tidyAgentText = (raw) => {
+      let value = esc(raw || "");
+      if (!value) return "";
+      const half = Math.floor(value.length / 2);
+      if (
+        value.length % 2 === 0 &&
+        value.slice(0, half).trim() === value.slice(half).trim()
+      ) {
+        value = value.slice(0, half).trim();
+      }
+      return value.length > 160
+        ? value.slice(0, 157).trimEnd() + "..."
+        : value;
+    };
+    const readCard = (card, index) => {
+      const row = card.closest(
+        "[data-tool-call-id], [data-message-id], [data-react-transcript-row-key]"
+      );
+      const titleEl = card.querySelector(
+        ".subagent-task-card-title, [class*='subagent'][class*='title']"
+      );
+      const statusRoot = card.querySelector(
+        ".subagent-task-card-status-stack, [class*='subagent'][class*='status']"
+      );
+      const currentStatus =
+        statusRoot?.querySelector("[data-slot='current']") ||
+        statusRoot?.querySelector("[data-sr-only='true']") ||
+        statusRoot;
+      const indicator = card.querySelector(
+        ".ui-subagent-status-indicator, [class*='subagent-status-indicator']"
+      );
+      const indicatorClass = String(indicator?.className || "");
+      const rowStatus = String(
+        row?.getAttribute("data-tool-status") ||
+          card.getAttribute("data-status") ||
+          ""
+      );
+      const hasStop =
+        !!card.querySelector(
+          ".task-subagent-header-pill-button--stop, button[aria-label*='Stop']"
+        ) ||
+        Array.from(card.querySelectorAll("button")).some((button) =>
+          /^stop$/i.test(btnLabel(button))
+        );
+      const hasLoader = !!card.querySelector(
+        ".ui-ascii-loading-indicator, .ui-dot-grid-animator, [class*='running-loader']"
+      );
+      const signal = `${indicatorClass} ${rowStatus} ${textOf(statusRoot)}`;
+      let state = "running";
+      if (/error|failed|failure|cancel|stopped|denied/i.test(signal)) {
+        state = "error";
+      } else if (
+        !hasStop &&
+        !hasLoader &&
+        /complete|success|finished|done|check/i.test(signal)
+      ) {
+        state = "completed";
+      }
+      const rawId =
+        row?.getAttribute("data-tool-call-id") ||
+        row?.getAttribute("data-message-id") ||
+        row?.getAttribute("data-react-transcript-row-key") ||
+        card.getAttribute("data-task-id") ||
+        "";
+      return {
+        id: rawId || `subagent:${index}`,
+        index: index + 1,
+        label: `Agent ${index + 1}`,
+        title: tidyAgentText(titleEl?.getAttribute("title") || textOf(titleEl)),
+        status: tidyAgentText(textOf(currentStatus)),
+        state,
+        model: tidyAgentText(
+          textOf(card.querySelector(".task-subagent-model-hover-trigger"))
+        ),
+      };
+    };
+    const descriptors = nearLiveTail
+      ? notificationRows
+          .map((row, index) => {
+            const actionEl = row.querySelector(".ui-collapsible-action");
+            const detailsEl = row.querySelector(".ui-collapsible-details");
+            const action = textOf(actionEl);
+            const details = textOf(detailsEl);
+            const countMatch = details.match(/\b(\d+)\s+sub\s*agents?\b/i);
+            if (!actionEl || !countMatch) return null;
+            const collapsible =
+              actionEl.closest(".ui-collapsible") ||
+              row.querySelector(".ui-step-group-collapsible");
+            const header = row.querySelector(".ui-collapsible-header");
+            const expanded =
+              header?.getAttribute("aria-expanded") === "true" &&
+              !collapsible?.hasAttribute("data-closed");
+            const cards = expanded
+              ? Array.from(
+                  row.querySelectorAll(
+                    ".subagent-task-card, [data-testid*='subagent-task-card']"
+                  )
+                ).filter(
+                  (card) =>
+                    card instanceof HTMLElement &&
+                    (card.matches(".subagent-task-card") ||
+                      !!card.querySelector(".subagent-task-card-title"))
+                )
+              : [];
+            return {
+              id:
+                row.getAttribute("data-react-transcript-row-key") ||
+                row.getAttribute("data-message-id") ||
+                `subagent-group:${index}:${details}`,
+              action,
+              details,
+              count: Number(countMatch[1]),
+              expanded,
+              isLastNotification: row === lastNotification,
+              agents: cards.slice(-24).map(readCard),
+            };
+          })
+          .filter(Boolean)
+      : [];
+    const overallLoading = !!(
+      document.querySelector(
+        ".loading-indicator-v3, .agent-transcript-tail-status, [class*='thinking'], [class*='spinner']"
+      ) ||
+      /running/i.test(textOf(document.querySelector(".agent-transcript-tail-status")))
+    );
+    subagents = {
+      conversation: focusedConversation,
+      ...parser.parseGroups(descriptors, overallLoading),
+    };
+  } catch (e) {}
+
   // ---- mode / model ----
   const modeEl = findFirst([
     ".composer-unified-dropdown[data-mode]",
@@ -513,6 +702,11 @@
       ? tidyStatus(textOf(statusEl))
       : "idle";
 
+  // Do not infer that the last assistant message is streaming from the global
+  // loading indicator. Other conversations can be working, and Cursor leaves
+  // completed markdown mounted beside the tail status. The phone already has
+  // a dedicated runner for live status, so transcript replies stay full-size.
+
   let workspace = "";
   try {
     const cfg =
@@ -563,6 +757,7 @@
     model,
     messages,
     activity,
+    subagents,
     approvals: collectButtons(approveSels, [
       "Accept All",
       "Accept",

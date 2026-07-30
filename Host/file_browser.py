@@ -77,6 +77,85 @@ def _is_allowed(path: Path) -> bool:
     return False
 
 
+def _looks_like_project(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    markers = (
+        ".git",
+        "package.json",
+        "pyproject.toml",
+        "Cargo.toml",
+        "go.mod",
+        "CMakeLists.txt",
+        "CursorDesk",
+    )
+    for name in markers:
+        if (path / name).exists():
+            return True
+    try:
+        if any(path.glob("*.uproject")):
+            return True
+        if any(path.glob("*.sln")):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def list_workspace_candidates(limit: int = 48) -> dict[str, Any]:
+    """Likely project folders for new-agent workspace picker."""
+    scan_roots: list[Path] = []
+    for raw in (
+        PROJECT,
+        PROJECT.parent,
+        HOME / "Documents" / "GitHub",
+        HOME / "Documents" / "Unreal Projects",
+        HOME / "Documents",
+        HOME / "source" / "repos",
+    ):
+        try:
+            resolved = raw.resolve()
+            if resolved.is_dir() and resolved not in scan_roots:
+                scan_roots.append(resolved)
+        except Exception:
+            continue
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for root in scan_roots:
+        try:
+            if _looks_like_project(root):
+                key = str(root).lower()
+                if key not in seen:
+                    seen.add(key)
+                    found.append(
+                        {
+                            "path": str(root),
+                            "name": root.name,
+                            "label": root.name,
+                        }
+                    )
+            for child in root.iterdir():
+                if not child.is_dir() or child.name.startswith("."):
+                    continue
+                if not _looks_like_project(child):
+                    continue
+                key = str(child.resolve()).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                found.append(
+                    {
+                        "path": str(child.resolve()),
+                        "name": child.name,
+                        "label": child.name,
+                    }
+                )
+        except Exception:
+            continue
+    found.sort(key=lambda item: item["name"].lower())
+    return {"ok": True, "workspaces": found[:limit], "roots": _roots()}
+
+
 def list_dir(path_str: str | None = None) -> dict[str, Any]:
     if not path_str:
         return {"ok": True, "path": None, "roots": _roots(), "entries": []}
@@ -150,5 +229,8 @@ def file_response_path(path_str: str) -> tuple[Path | None, str | None]:
 
 
 def guess_media_type(path: Path) -> str:
+    ext = path.suffix.lower()
+    if ext == ".gif":
+        return "image/gif"
     mt, _ = mimetypes.guess_type(str(path))
     return mt or "application/octet-stream"

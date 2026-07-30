@@ -7,7 +7,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
 <meta name="theme-color" content="#0b0f0d"/>
 <title>CursorDesk</title>
-<link rel="stylesheet" href="/app.css"/>
+<link rel="stylesheet" href="/app.css?v=20260729w"/>
 </head>
 <body>
   <div id="top">
@@ -60,6 +60,30 @@
     <button id="editSend" type="button" class="primaryBtn">Resend</button>
   </div>
 
+  <div id="newAgentModal" class="sheet">
+    <div class="sheetHead">
+      <div class="sheetTitle">New Agent</div>
+      <button id="newAgentClose" type="button">Close</button>
+    </div>
+    <div class="newAgentBody">
+      <div class="fieldLabel">Working folder</div>
+      <div id="newAgentPath" class="pathPick">Pick a project folder…</div>
+      <div id="newAgentWorkspaceList" class="pickList"></div>
+      <button id="newAgentBrowse" type="button" class="ghostBtn">Browse folders…</button>
+      <div class="fieldLabel">Model</div>
+      <div id="newAgentModelList" class="pickList">Loading models…</div>
+      <div class="fieldLabel">Mode <span class="fieldHint">(sent as /plan, /ask…)</span></div>
+      <div id="newAgentModeRow" class="modePickRow">
+        <button type="button" data-mode="agent" class="on">Agent</button>
+        <button type="button" data-mode="plan">Plan</button>
+        <button type="button" data-mode="ask">Ask</button>
+        <button type="button" data-mode="debug">Debug</button>
+        <button type="button" data-mode="multitask">Multi</button>
+      </div>
+      <button id="newAgentCreate" type="button" class="primaryBtn">Create Agent</button>
+    </div>
+  </div>
+
   <div id="toast"></div>
 
   <div id="agentImagePreview" aria-hidden="true">
@@ -95,6 +119,10 @@
         <div id="chatLog"></div>
         <div id="chatRunner"></div>
       </div>
+      <section id="agentTreeDock" aria-label="Subagent activity" aria-live="polite">
+        <button id="agentTreeToggle" type="button" aria-expanded="false"></button>
+        <div id="agentTreeList"></div>
+      </section>
     </div>
 
     <div id="desktop">
@@ -143,6 +171,6 @@
     <button id="tabFiles" type="button"><span class="icon">📁</span>Files</button>
   </div>
 
-<script src="/app.js?v=20260729e"></script>
+<script src="/app.js?v=20260729w"></script>
 </body>
 </html>

@@ -1,4 +1,4 @@
-# CursorDesk — single launcher for install, start, stop, and restart.
+# CursorDesk - single launcher for install, start, stop, and restart.
 #
 # Usage:
 #   Start-CursorDesk.bat                 Start host (foreground; Ctrl+C stops)
@@ -50,7 +50,7 @@ function Install-TailscalePackage {
   if (-not $ts) {
     winget install --id Tailscale.Tailscale -e --accept-package-agreements --accept-source-agreements
   } else {
-    Write-Host "Tailscale already installed — checking for updates..." -ForegroundColor DarkGray
+    Write-Host "Tailscale already installed - checking for updates..." -ForegroundColor DarkGray
     winget upgrade --id Tailscale.Tailscale -e --accept-package-agreements --accept-source-agreements 2>$null
   }
   Write-Host ""
@@ -175,8 +175,11 @@ function Ensure-CursorCdp {
 
 function Stop-CursorDeskHost {
   param([int]$Port)
-  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "Stop-Host.ps1") -Port $Port
-  return $LASTEXITCODE
+  $stopScript = Join-Path $PSScriptRoot "Stop-Host.ps1"
+  $proc = Start-Process -FilePath "powershell.exe" `
+    -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $stopScript, "-Port", "$Port") `
+    -Wait -PassThru -WindowStyle Hidden
+  return [int]$proc.ExitCode
 }
 
 function Start-CursorDeskHostBackground {
@@ -201,7 +204,7 @@ if ($InstallDeps) {
 
 if ($Stop) {
   Write-Host "Stopping CursorDesk host on :$Port ..." -ForegroundColor Cyan
-  Write-Host "(Does NOT quit Cursor — only the phone host.)" -ForegroundColor DarkGray
+  Write-Host "(Does NOT quit Cursor - only the phone host.)" -ForegroundColor DarkGray
   $code = Stop-CursorDeskHost -Port $Port
   if ($code -eq 0) { Write-Host "Host stopped." -ForegroundColor Green }
   exit $code
@@ -211,7 +214,7 @@ if ($Restart) {
   Write-Host "Restarting CursorDesk host on :$Port ..." -ForegroundColor Cyan
   $code = Stop-CursorDeskHost -Port $Port
   if ($code -ne 0) {
-    Write-Host "Could not free port $Port — host not restarted." -ForegroundColor Red
+    Write-Host "Could not free port $Port - host not restarted." -ForegroundColor Red
     exit 1
   }
   Start-CursorDeskHostBackground -Port $Port

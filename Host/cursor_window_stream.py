@@ -508,6 +508,9 @@ def health() -> dict:
     with _settings_lock:
         settings = dict(_settings)
     agent = AGENT.state
+    subagents = agent.get("subagents") or {}
+    if not isinstance(subagents, dict):
+        subagents = {}
     return {
         "ok": True,
         "hwnd": int(HUB.hwnd or 0),
@@ -525,8 +528,52 @@ def health() -> dict:
             "status": agent.get("status"),
             "workspace": agent.get("workspace"),
             "error": agent.get("error"),
+            "subagents": {
+                "total": int(subagents.get("total") or 0),
+                "running": int(subagents.get("running") or 0),
+                "conversation": subagents.get("conversation") or {},
+            },
         },
     }
+
+
+@app.get("/api/workspaces")
+def api_workspaces() -> JSONResponse:
+    return JSONResponse(file_browser.list_workspace_candidates())
+
+
+@app.post("/api/agent/new")
+async def api_agent_new(request: Request) -> JSONResponse:
+    payload = await request.json()
+    result = await AGENT.new_agent_setup(
+        str(payload.get("workspace") or payload.get("path") or ""),
+        str(payload.get("model") or ""),
+        str(payload.get("mode") or ""),
+    )
+    return JSONResponse(result)
+
+
+@app.get("/api/agent/conversation-cache")
+async def api_conversation_cache(tab_id: str = "", id: str = "") -> JSONResponse:
+    return JSONResponse(AGENT.conversation_cache(tab_id or id))
+
+
+@app.get("/api/agent/conversation-caches")
+async def api_conversation_caches() -> JSONResponse:
+    return JSONResponse(AGENT.all_conversation_caches())
+
+
+@app.post("/api/agent/prompt")
+async def api_agent_prompt(request: Request) -> JSONResponse:
+    payload = await request.json()
+    result = await AGENT.submit_prompt(
+        str(payload.get("text") or ""),
+        payload.get("images") if isinstance(payload.get("images"), list) else [],
+        str(payload.get("tab_id") or payload.get("tabId") or ""),
+        str(payload.get("tab_title") or payload.get("tabTitle") or ""),
+        str(payload.get("request_id") or payload.get("requestId") or ""),
+    )
+    return JSONResponse(result)
 
 
 @app.get("/api/agent-image", response_model=None)
@@ -544,11 +591,44 @@ async def agent_image(src: str = "", path: str = ""):
         content = base64.b64decode(str(result.get("data") or ""), validate=True)
     except Exception:
         return JSONResponse({"ok": False, "error": "invalid image data"}, status_code=502)
+    mime = str(result.get("mime") or "image/png")
     return Response(
         content=content,
-        media_type=str(result.get("mime") or "image/png"),
+        media_type=mime,
         headers={"Cache-Control": "private, max-age=300"},
     )
+
+
+@app.post("/api/desk/make-gif")
+async def api_make_gif(request: Request) -> JSONResponse:
+    from desk_media.make_gif import collect_frames_from_dir, create_gif_from_paths
+
+    payload = await request.json()
+    frames = [str(p) for p in (payload.get("frames") or []) if str(p).strip()]
+    from_dir = str(payload.get("from_dir") or payload.get("directory") or "").strip()
+    pattern = str(payload.get("pattern") or "*").strip() or "*"
+    output = str(payload.get("output") or payload.get("output_name") or "").strip() or None
+    duration_ms = int(payload.get("duration_ms") or payload.get("duration") or 200)
+    loop = int(payload.get("loop") or 0)
+    try:
+        if from_dir:
+            frames = collect_frames_from_dir(from_dir, pattern)
+        out = create_gif_from_paths(
+            frames,
+            output,
+            duration_ms=duration_ms,
+            loop=loop,
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "path": str(out),
+                "local": f"local:{out}",
+                "mime": "image/gif",
+            }
+        )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
 
 
 @app.get("/api/files")
@@ -620,6 +700,7 @@ async def ws_agent(ws: WebSocket) -> None:
     await ws.accept()
     q = AGENT.subscribe()
     try:
+        AGENT._kick_outbox_drain()
         await ws.send_text(json.dumps({"type": "state", "state": AGENT.state}))
 
         async def reader() -> None:
@@ -631,10 +712,18 @@ async def ws_agent(ws: WebSocket) -> None:
                     continue
                 typ = msg.get("type")
                 if typ == "prompt":
+                    text = str(msg.get("text") or "")
+                    tab_id = str(msg.get("tab_id") or msg.get("tabId") or "")
+                    tab_title = str(msg.get("tab_title") or msg.get("tabTitle") or "")
                     result = await AGENT.prompt(
-                        str(msg.get("text") or ""),
+                        text,
                         msg.get("images") if isinstance(msg.get("images"), list) else [],
+                        tab_id,
+                        tab_title,
                     )
+                    if result.get("sent"):
+                        result["sent"] = True
+                        result["text"] = text
                     await ws.send_text(json.dumps({"type": "result", **result}))
                 elif typ == "approve":
                     result = await AGENT.approve()
@@ -645,8 +734,18 @@ async def ws_agent(ws: WebSocket) -> None:
                 elif typ == "new_chat":
                     result = await AGENT.new_chat()
                     await ws.send_text(json.dumps({"type": "result", **result}))
+                elif typ == "new_agent":
+                    result = await AGENT.new_agent_setup(
+                        str(msg.get("workspace") or msg.get("path") or ""),
+                        str(msg.get("model") or ""),
+                        str(msg.get("mode") or ""),
+                    )
+                    await ws.send_text(json.dumps({"type": "result", **result}))
                 elif typ == "select_tab":
-                    result = await AGENT.select_tab(str(msg.get("id") or ""))
+                    result = await AGENT.select_tab(
+                        str(msg.get("id") or ""),
+                        str(msg.get("tab_title") or msg.get("tabTitle") or ""),
+                    )
                     await ws.send_text(json.dumps({"type": "result", **result}))
                 elif typ == "switch_window":
                     result = await AGENT.switch_window(str(msg.get("id") or ""))

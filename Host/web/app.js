@@ -15,8 +15,582 @@
   let editMsgId = null;
   let modelCache = [];
   let pendingImages = [];
+  let pendingTabSwitch = null;
   let chatPinnedBottom = true;
   let lastChatRenderKey = '';
+  let lastRenderedMsgCount = 0;
+  let userScrolledUpAt = 0;
+  let agentTreeExpanded = false;
+  let lastAgentTreeSetKey = '';
+  let lastAgentTreeRenderKey = '';
+  let viewingTabId = null;
+  let activeConversation = { id: '', title: '' };
+  let optimisticMessages = [];
+  const CONV_CACHE_KEY = 'cdesk:conv:v1';
+  const CLIENT_OUTBOX_KEY = 'cdesk:outbox:v1';
+  const AGENT_PREFS_KEY = 'cdesk:agentPrefs:v1';
+  const MODE_SLASH = {
+    agent: '',
+    plan: '/plan',
+    ask: '/ask',
+    debug: '/debug',
+    multitask: '/multitask',
+    triage: '/multitask',
+    edit: '/edit',
+  };
+  let composerMode = 'agent';
+  let stickyModeSlash = '';
+  let newAgentWorkspace = '';
+  let newAgentModel = '';
+  let newAgentMode = 'agent';
+  let newAgentBrowsePath = null;
+
+  function readAgentPrefs() {
+    try { return JSON.parse(localStorage.getItem(AGENT_PREFS_KEY) || '{}'); }
+    catch (e) { return {}; }
+  }
+  function saveAgentPrefs(patch) {
+    try {
+      localStorage.setItem(AGENT_PREFS_KEY, JSON.stringify({ ...readAgentPrefs(), ...patch }));
+    } catch (e) {}
+  }
+  function preparePromptText(raw) {
+    let body = String(raw || '').trim();
+    if (!body) return body;
+    if (/^\/(agent|plan|ask|debug|multitask|triage|model|edit)\b/i.test(body)) return body;
+    // Mode buttons are the source of truth. stickyModeSlash must always track
+    // the selected mode — never a stale /multitask leftover from an earlier chat.
+    const slash = MODE_SLASH[composerMode] || '';
+    if (slash) return `${slash} ${body}`.trim();
+    return body;
+  }
+  function setComposerMode(mode) {
+    composerMode = String(mode || 'agent').toLowerCase();
+    stickyModeSlash = MODE_SLASH[composerMode] || '';
+    document.querySelectorAll('#modeRow button').forEach((btn) => {
+      btn.classList.toggle('on', btn.dataset.mode === composerMode);
+    });
+    const slash = stickyModeSlash;
+    text.placeholder = slash
+      ? `Message (${slash} …)`
+      : 'Message Cursor agent…';
+    saveAgentPrefs({ mode: composerMode });
+  }
+  function closeNewAgentModal() {
+    newAgentModal.classList.remove('open');
+    if (!drawer.classList.contains('open')) scrim.classList.remove('open');
+    newAgentBrowsePath = null;
+  }
+  function renderNewAgentWorkspaces(workspaces, roots) {
+    const rows = (workspaces || []).map((ws) =>
+      `<button type="button" class="pickRow${newAgentWorkspace === ws.path ? ' active' : ''}" data-path="${escapeHtml(ws.path)}">${escapeHtml(ws.label || ws.name)}<span class="sub">${escapeHtml(ws.path)}</span></button>`
+    ).join('');
+    newAgentWorkspaceList.innerHTML = rows || '<div class="sub" style="padding:8px">No project folders found — browse below.</div>';
+    newAgentWorkspaceList.querySelectorAll('[data-path]').forEach((btn) => {
+      btn.onclick = () => {
+        newAgentWorkspace = btn.dataset.path || '';
+        newAgentPath.textContent = newAgentWorkspace;
+        newAgentPath.classList.add('picked');
+        renderNewAgentWorkspaces(workspaces, roots);
+      };
+    });
+  }
+  function renderNewAgentModels(models) {
+    const picks = (models || []).filter((m) => m.group !== 'header');
+    if (!picks.length) {
+      newAgentModelList.innerHTML = '<div class="sub" style="padding:8px">Open Agents in Cursor to load models.</div>';
+      return;
+    }
+    const current = newAgentModel || picks.find((m) => m.selected)?.label || picks[0].label;
+    newAgentModel = current;
+    newAgentModelList.innerHTML = picks.map((m) =>
+      `<button type="button" class="pickRow${m.label === newAgentModel ? ' active' : ''}" data-model="${escapeHtml(m.id || m.label)}">${escapeHtml(m.label)}${m.selected ? '<span class="sub">current</span>' : ''}</button>`
+    ).join('');
+    newAgentModelList.querySelectorAll('[data-model]').forEach((btn) => {
+      btn.onclick = () => {
+        newAgentModel = btn.textContent.replace(/\s*current$/i, '').trim();
+        renderNewAgentModels(models);
+      };
+    });
+  }
+  async function loadNewAgentBrowse(path) {
+    const data = await fetch('/api/files' + (path ? `?path=${encodeURIComponent(path)}` : '')).then((r) => r.json());
+    if (!data.ok) {
+      showToast(data.error || 'Could not browse folders');
+      return;
+    }
+    newAgentBrowsePath = data.path || null;
+    const head = data.path
+      ? `<button type="button" class="pickRow active" data-use="1">Use this folder<span class="sub">${escapeHtml(data.path)}</span></button>`
+        + `<button type="button" class="pickRow ghost" data-parent="${escapeHtml(data.parent || '')}">↑ Up</button>`
+      : '';
+    const dirs = (data.entries || []).filter((e) => e.isDir).map((e) =>
+      `<button type="button" class="pickRow" data-dir="${escapeHtml(e.path)}">${escapeHtml(e.name)}<span class="sub">folder</span></button>`
+    ).join('');
+    const roots = (data.roots || []).map((r) =>
+      `<button type="button" class="pickRow" data-dir="${escapeHtml(r.path)}">${escapeHtml(r.label)}<span class="sub">root</span></button>`
+    ).join('');
+    newAgentWorkspaceList.innerHTML = head + (data.path ? dirs : roots + dirs);
+    newAgentWorkspaceList.querySelectorAll('[data-use]').forEach((btn) => {
+      btn.onclick = () => {
+        if (!data.path) return;
+        newAgentWorkspace = data.path;
+        newAgentPath.textContent = data.path;
+        newAgentPath.classList.add('picked');
+        fetch('/api/workspaces').then((r) => r.json()).then((ws) => {
+          renderNewAgentWorkspaces(ws.workspaces || [], ws.roots || []);
+        }).catch(() => {});
+      };
+    });
+    newAgentWorkspaceList.querySelectorAll('[data-parent]').forEach((btn) => {
+      btn.onclick = () => loadNewAgentBrowse(btn.dataset.parent || null);
+    });
+    newAgentWorkspaceList.querySelectorAll('[data-dir]').forEach((btn) => {
+      btn.onclick = () => {
+        const p = btn.dataset.dir || '';
+        if (btn.querySelector('.sub')?.textContent === 'folder') {
+          loadNewAgentBrowse(p);
+          return;
+        }
+        newAgentWorkspace = p;
+        newAgentPath.textContent = p;
+        newAgentPath.classList.add('picked');
+      };
+    });
+  }
+  async function openNewAgentModal() {
+    const prefs = readAgentPrefs();
+    newAgentWorkspace = prefs.workspace || newAgentWorkspace || '';
+    newAgentModel = prefs.model || newAgentModel || '';
+    newAgentMode = prefs.mode || composerMode || 'agent';
+    newAgentPath.textContent = newAgentWorkspace || 'Pick a project folder…';
+    newAgentPath.classList.toggle('picked', !!newAgentWorkspace);
+    document.querySelectorAll('#newAgentModeRow button').forEach((btn) => {
+      btn.classList.toggle('on', btn.dataset.mode === newAgentMode);
+    });
+    openDrawer(false);
+    closeSheet();
+    editModal.classList.remove('open');
+    newAgentModal.classList.add('open');
+    scrim.classList.add('open');
+    try {
+      const ws = await fetch('/api/workspaces').then((r) => r.json());
+      renderNewAgentWorkspaces(ws.workspaces || [], ws.roots || []);
+    } catch (e) {
+      newAgentWorkspaceList.innerHTML = '<div class="sub" style="padding:8px">Could not load workspaces.</div>';
+    }
+    agentSend({ type: 'list_models' });
+  }
+  async function createNewAgent() {
+    if (!newAgentWorkspace) {
+      showToast('Choose a working folder first');
+      return;
+    }
+    saveAgentPrefs({
+      workspace: newAgentWorkspace,
+      model: newAgentModel,
+      mode: newAgentMode,
+    });
+    setComposerMode(newAgentMode);
+    closeNewAgentModal();
+    showToast('Creating agent…');
+    try {
+      const result = await fetch('/api/agent/new', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspace: newAgentWorkspace,
+          model: newAgentModel,
+          mode: newAgentMode,
+        }),
+        cache: 'no-store',
+      }).then((r) => r.json());
+      if (!result.ok) {
+        showToast(result.error || 'Could not create agent');
+        return;
+      }
+      // Keep the selected mode button authoritative; do not leave a sticky
+      // slash that outlives a later tap of Agent.
+      setComposerMode(newAgentMode);
+      if (result.warnings?.length) showToast(result.warnings[0]);
+      else showToast(`Agent ready · ${newAgentWorkspace.split(/[\\/]/).pop() || 'project'}`);
+      // Do not keep targeting the previous conversation after creating a new agent.
+      activeConversation = { id: '', title: '' };
+      viewingTabId = null;
+      pendingTabSwitch = null;
+      optimisticMessages = [];
+      lastChatRenderKey = '';
+      chatLog.innerHTML = '<div class="msg"><div class="body" style="opacity:.55">New agent — send a message to start.</div></div>';
+    } catch (e) {
+      showToast('Create agent failed — host unreachable');
+    }
+  }
+  function readConvStore() {
+    try { return JSON.parse(localStorage.getItem(CONV_CACHE_KEY) || '{}'); }
+    catch (e) { return {}; }
+  }
+  function saveConvCacheEntry(tabId, entry) {
+    if (!tabId || !entry) return;
+    const all = readConvStore();
+    all[tabId] = {
+      title: entry.title || all[tabId]?.title || '',
+      messages: entry.messages || [],
+      updatedAt: Date.now(),
+    };
+    const keys = Object.keys(all).sort((a, b) => (all[b].updatedAt || 0) - (all[a].updatedAt || 0));
+    keys.slice(48).forEach((k) => delete all[k]);
+    try { localStorage.setItem(CONV_CACHE_KEY, JSON.stringify(all)); } catch (e) {}
+  }
+  function getConvCache(tabId) {
+    return readConvStore()[tabId] || null;
+  }
+  function switchCacheReady(tabId) {
+    const entry = getConvCache(tabId);
+    return !!(entry?.messages?.length);
+  }
+  function mergeServerCaches(caches) {
+    if (!caches || typeof caches !== 'object') return;
+    Object.keys(caches).forEach((tabId) => {
+      const remote = caches[tabId];
+      if (!remote?.messages?.length) return;
+      const local = getConvCache(tabId);
+      const localAt = Number(local?.updatedAt || 0);
+      const remoteAt = Number(remote.updatedAt || 0) * (remote.updatedAt < 1e12 ? 1000 : 1);
+      const localCount = local?.messages?.length || 0;
+      if (!localCount || remoteAt > localAt || remote.messages.length > localCount) {
+        saveConvCacheEntry(tabId, remote);
+      }
+    });
+  }
+  async function prefetchServerCaches() {
+    try {
+      const r = await fetch('/api/agent/conversation-caches', { cache: 'no-store' });
+      const data = await r.json();
+      if (data.ok && data.caches) mergeServerCaches(data.caches);
+    } catch (e) {}
+  }
+  function readClientOutbox() {
+    try { return JSON.parse(localStorage.getItem(CLIENT_OUTBOX_KEY) || '[]'); }
+    catch (e) { return []; }
+  }
+  function writeClientOutbox(items) {
+    try { localStorage.setItem(CLIENT_OUTBOX_KEY, JSON.stringify(items.slice(-12))); } catch (e) {}
+  }
+  function setActiveConversation(id, title) {
+    activeConversation = { id: String(id || ''), title: String(title || '') };
+    viewingTabId = activeConversation.id;
+    optimisticMessages = optimisticMessages.filter(
+      (m) => !m.tabId || m.tabId === activeConversation.id
+    );
+    lastAgentTreeRenderKey = '';
+    if (agentState) {
+      renderSubagentDock(
+        agentState,
+        (agentState.approvals || []).length > 0 || (agentState.rejects || []).length > 0
+      );
+    }
+  }
+  function normalizeConvTitle(title) {
+    return String(title || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/\s+(\d+\s*[smhdw]\s+ago|\d+\s+[smhdw]\s+ago|just now|now)$/i, '')
+      .trim();
+  }
+  function titlesMatch(want, got) {
+    want = normalizeConvTitle(want).toLowerCase();
+    got = normalizeConvTitle(got).toLowerCase();
+    if (!want || !got) return false;
+    return want === got || got.startsWith(want) || want.startsWith(got);
+  }
+  function conversationMatches(state, target) {
+    if (!target?.id && !target?.title) return true;
+    const active = (state?.tabs || []).find((t) => t.active);
+    if (target.id && active?.id && target.id === active.id) return true;
+    if (target.title && active?.title && titlesMatch(target.title, active.title)) return true;
+    const sid = String(state?.selectedTabId || '');
+    const stitle = String(state?.selectedTabTitle || '');
+    if (target.id && sid && target.id === sid) return true;
+    if (target.title && stitle && titlesMatch(target.title, stitle)) return true;
+    return false;
+  }
+  function sendTarget(state) {
+    if (activeConversation.id || activeConversation.title) {
+      return { id: activeConversation.id, title: activeConversation.title };
+    }
+    const active = (state?.tabs || []).find((t) => t.active);
+    if (active) return { id: active.id || '', title: active.title || '' };
+    return {
+      id: state?.selectedTabId || '',
+      title: state?.selectedTabTitle || '',
+    };
+  }
+  function messagesForActiveConv(state) {
+    const st = state || agentState;
+    const target = sendTarget(st);
+    let messagesForView = st?.messages || [];
+    if ((target.id || target.title) && !conversationMatches(st, target)) {
+      const cached = getConvCache(target.id);
+      messagesForView = cached?.messages?.length ? cached.messages : [];
+    }
+    return { messagesForView, target };
+  }
+  function currentTabId(state) {
+    return sendTarget(state || agentState).id;
+  }
+  function promptTarget(state) {
+    const t = sendTarget(state || agentState);
+    return { tab_id: t.id, tab_title: t.title };
+  }
+  function outboxMatches(item, payload) {
+    if (payload.request_id && item.request_id) return item.request_id === payload.request_id;
+    if (item.text !== payload.text) return false;
+    if (payload.tab_id && item.tab_id && item.tab_id !== payload.tab_id) return false;
+    if (payload.tab_title && item.tab_title && item.tab_title !== payload.tab_title) return false;
+    return true;
+  }
+  function showCachedConversation(tabId, entry, syncing) {
+    if (!entry?.messages?.length) return false;
+    setActiveConversation(tabId, entry.title || activeConversation.title);
+    lastChatRenderKey = '';
+    const scoped = optimisticMessages.filter((m) => !m.tabId || m.tabId === tabId);
+    renderChatMessages(normalizeMessages(entry.messages, false).concat(scoped));
+    if (syncing && tab === 'agent') {
+      meta.textContent = `${entry.title || 'Conversation'} · syncing…`;
+    }
+    return true;
+  }
+  async function hydrateConversationCache(tabId) {
+    const local = getConvCache(tabId);
+    try {
+      const r = await fetch(`/api/agent/conversation-cache?tab_id=${encodeURIComponent(tabId)}`, { cache: 'no-store' });
+      const data = await r.json();
+      if (data.ok && data.messages?.length) {
+        const localAt = Number(local?.updatedAt || 0);
+        const remoteAt = Number(data.updatedAt || 0) * (data.updatedAt < 1e12 ? 1000 : 1);
+        const localCount = local?.messages?.length || 0;
+        const remoteCount = data.messages.length;
+        if (!localCount || remoteAt > localAt || remoteCount > localCount) {
+          saveConvCacheEntry(tabId, data);
+          return data;
+        }
+      }
+    } catch (e) {}
+    return local?.messages?.length ? local : null;
+  }
+  function appendOptimisticHuman(text, imageCount) {
+    const trimmed = String(text || '').trim();
+    if (!trimmed && !imageCount) return;
+    const { messagesForView, target } = messagesForActiveConv(agentState);
+    optimisticMessages.push({
+      type: 'human',
+      role: 'human',
+      text: trimmed || `(📷 ×${imageCount})`,
+      id: `local-${Date.now()}`,
+      tabId: target.id,
+      ago: 'sending…',
+      pending: true,
+    });
+    lastChatRenderKey = '';
+    renderChatMessages(
+      normalizeMessages(messagesForView, false)
+        .concat(optimisticMessages.filter((m) => !m.tabId || m.tabId === target.id))
+    );
+    chatPinnedBottom = true;
+    scrollChatToEnd();
+  }
+  function normalizeForMatch(s) {
+    return String(s || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/^\/(agent|plan|ask|debug|multitask|triage|model|edit)\s+/i, '');
+  }
+  function markOptimisticSent(text, tabId) {
+    const want = normalizeForMatch(text);
+    if (!want) return;
+    let changed = false;
+    optimisticMessages.forEach((opt) => {
+      if (tabId && opt.tabId && opt.tabId !== tabId) return;
+      if (normalizeForMatch(opt.text) === want || want.includes(normalizeForMatch(opt.text))) {
+        opt.pending = false;
+        opt.failed = false;
+        opt.error = '';
+        opt.ago = '';
+        changed = true;
+      }
+    });
+    if (changed) lastChatRenderKey = '';
+  }
+  function failOptimistic(text, error, tabId) {
+    const want = normalizeForMatch(text);
+    if (!want) return;
+    let changed = false;
+    optimisticMessages.forEach((opt) => {
+      if (tabId && opt.tabId && opt.tabId !== tabId) return;
+      if (!opt.pending && !opt.failed) return;
+      if (normalizeForMatch(opt.text) === want || want.includes(normalizeForMatch(opt.text))) {
+        opt.pending = false;
+        opt.failed = true;
+        opt.error = String(error || 'Send failed');
+        opt.ago = 'failed — tap to retry';
+        changed = true;
+      }
+    });
+    if (changed) lastChatRenderKey = '';
+  }
+  function dismissStaleOptimistic(loading) {
+    if (!optimisticMessages.length) return;
+    const now = Date.now();
+    let changed = false;
+    optimisticMessages.forEach((opt) => {
+      if (!opt.pending) return;
+      const age = now - Number(String(opt.id || '').replace('local-', '') || 0);
+      if (age > 45000) {
+        opt.pending = false;
+        opt.failed = true;
+        opt.error = 'No confirmation from Cursor';
+        opt.ago = 'failed — tap to retry';
+        changed = true;
+      }
+    });
+    if (changed) lastChatRenderKey = '';
+  }
+  function reconcileOptimistic(messages) {
+    if (!optimisticMessages.length) return;
+    // Only treat recent human messages as confirmation — older identical text
+    // (e.g. "continue") must not clear a still-pending send.
+    const humans = (messages || []).filter((m) => {
+      const k = String(m.type || m.role || '').toLowerCase();
+      return k === 'human';
+    }).slice(-8);
+    optimisticMessages = optimisticMessages.filter((opt) => {
+      const want = normalizeForMatch(opt.text);
+      if (!want) return false;
+      return !humans.some((m) => {
+        const got = normalizeForMatch(m.text);
+        if (!got) return false;
+        return got === want || got.includes(want) || want.includes(got.slice(0, Math.min(got.length, 160)));
+      });
+    });
+  }
+  async function postPromptDurable(payload, keepalive) {
+    try {
+      const r = await fetch('/api/agent/prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        keepalive: !!keepalive,
+        cache: 'no-store',
+      });
+      return await r.json();
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  }
+  function queueClientOutbox(payload) {
+    const items = readClientOutbox();
+    const queued = {
+      ...payload,
+      id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      request_id: payload.request_id || `phone-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+      at: Date.now(),
+    };
+    items.push(queued);
+    writeClientOutbox(items);
+    return queued;
+  }
+  function dropClientOutbox(payload) {
+    writeClientOutbox(readClientOutbox().filter((item) => !outboxMatches(item, payload)));
+  }
+  function outboxPayloadFromItem(item) {
+    return {
+      text: item.text,
+      images: item.images || [],
+      tab_id: item.tab_id || item.tabId || '',
+      tab_title: item.tab_title || item.tabTitle || '',
+      request_id: item.request_id || item.requestId || item.id || '',
+    };
+  }
+  function handlePromptDeliveryResult(result, payload) {
+    if (result?.sent) {
+      dropClientOutbox(payload);
+      markOptimisticSent(payload.text, payload.tab_id);
+      return;
+    }
+    if (result?.queued) {
+      dropClientOutbox(payload);
+      if (result.direct_error) showToast(result.direct_error);
+      return;
+    }
+    const err = result?.error || result?.direct_error || 'Message could not be sent';
+    failOptimistic(payload.text, err, payload.tab_id);
+    showToast(err);
+  }
+  function reconcileOutboxWithMessages(messages, tabId) {
+    const items = readClientOutbox();
+    if (!items.length) return;
+    const humans = (messages || []).filter((m) => {
+      const k = String(m.type || m.role || '').toLowerCase();
+      return k === 'human';
+    });
+    items.forEach((item) => {
+      if (tabId && item.tab_id && item.tab_id !== tabId) return;
+      const want = normalizeForMatch(item.text);
+      if (!want) return;
+      const found = humans.some((m) => {
+        const got = normalizeForMatch(m.text);
+        return got && (got === want || got.includes(want) || want.includes(got.slice(0, 160)));
+      });
+      if (found) {
+        dropClientOutbox(outboxPayloadFromItem(item));
+        markOptimisticSent(item.text, item.tab_id);
+      }
+    });
+  }
+  async function flushClientOutbox(keepalive, force) {
+    if (!keepalive && !force && aws && aws.readyState === 1) return;
+    const items = readClientOutbox();
+    if (!items.length) return;
+    for (const item of items) {
+      const payload = outboxPayloadFromItem(item);
+      const result = await postPromptDurable(payload, keepalive);
+      if (result?.sent) {
+        writeClientOutbox(readClientOutbox().filter((x) => x.id !== item.id));
+        markOptimisticSent(payload.text, payload.tab_id);
+      } else if (result?.queued) {
+        writeClientOutbox(readClientOutbox().filter((x) => x.id !== item.id));
+      } else if (result?.error) {
+        failOptimistic(payload.text, result.error, payload.tab_id);
+        if (!keepalive) showToast(result.error);
+        break;
+      } else if (keepalive) {
+        break;
+      }
+    }
+  }
+  function retryOptimisticMessage(el) {
+    const mid = el.dataset.mid || '';
+    const opt = optimisticMessages.find((m) => (m.id || m.messageId) === mid);
+    if (!opt) return;
+    const target = opt.tabId
+      ? { tab_id: opt.tabId, tab_title: getConvCache(opt.tabId)?.title || activeConversation.title }
+      : promptTarget(agentState);
+    opt.pending = true;
+    opt.failed = false;
+    opt.error = '';
+    opt.ago = 'sending…';
+    lastChatRenderKey = '';
+    const payload = {
+      type: 'prompt',
+      text: opt.text,
+      images: [],
+      tab_id: target.tab_id,
+      tab_title: target.tab_title,
+    };
+    const queued = queueClientOutbox(payload);
+    postPromptDurable(queued, false).then((result) => handlePromptDeliveryResult(result, queued));
+    renderAgent(agentState);
+  }
 
   const canvas = document.getElementById('frame');
   const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
@@ -31,6 +605,9 @@
   const chatLog = document.getElementById('chatLog');
   const agentBanner = document.getElementById('agentBanner');
   const approvals = document.getElementById('approvals');
+  const agentTreeDock = document.getElementById('agentTreeDock');
+  const agentTreeToggle = document.getElementById('agentTreeToggle');
+  const agentTreeList = document.getElementById('agentTreeList');
   const filesList = document.getElementById('filesList');
   const filesPathEl = document.getElementById('filesPath');
   const rootSel = document.getElementById('rootSel');
@@ -48,6 +625,10 @@
   const sheetBody = document.getElementById('sheetBody');
   const editModal = document.getElementById('editModal');
   const editText = document.getElementById('editText');
+  const newAgentModal = document.getElementById('newAgentModal');
+  const newAgentPath = document.getElementById('newAgentPath');
+  const newAgentWorkspaceList = document.getElementById('newAgentWorkspaceList');
+  const newAgentModelList = document.getElementById('newAgentModelList');
   const toast = document.getElementById('toast');
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 
@@ -94,28 +675,52 @@
       return `/api/agent-image?path=${encodeURIComponent(src)}`;
     return `/api/agent-image?src=${encodeURIComponent(src)}`;
   }
+  function isGifMedia(image, src) {
+    const hint = String(image?.path || image?.src || src || '');
+    return /\.gif(\?|$)/i.test(hint);
+  }
   function openImagePreview(url, label) {
     previewPath = null;
+    const isGif = /\.gif(\?|$)/i.test(String(url || ''));
+    agentImagePreview.classList.toggle('is-gif', isGif);
     agentImagePreviewImg.src = url;
-    agentImagePreviewImg.alt = label || 'Image';
+    agentImagePreviewImg.alt = label || (isGif ? 'GIF' : 'Image');
     agentImagePreview.classList.add('show');
     agentImagePreview.setAttribute('aria-hidden', 'false');
   }
   function closeImagePreview() {
-    agentImagePreview.classList.remove('show');
+    agentImagePreview.classList.remove('show', 'is-gif');
     agentImagePreview.setAttribute('aria-hidden', 'true');
     agentImagePreviewImg.removeAttribute('src');
   }
   function updateChatPinned() {
-    chatPinnedBottom = chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight < 96;
+    const nearBottom = chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight < 96;
+    chatPinnedBottom = nearBottom;
+    if (!nearBottom) userScrolledUpAt = Date.now();
   }
-  function messageRenderKey(msgs) {
-    return (msgs || []).map((m) => JSON.stringify({
+  function stableImageKey(images) {
+    return (images || [])
+      .map((i) => String(i.path || i.src || '').split('?')[0].trim())
+      .filter(Boolean)
+      .sort()
+      .join('|');
+  }
+  function stableTextKey(m, idx, total, loading) {
+    const kind = String(m.type || m.role || '').toLowerCase();
+    const text = String(m.text || '');
+    if (kind === 'footnote' && loading && idx === total - 1) return '__streaming__';
+    if (kind === 'footnote') return `fn:${text.slice(0, 120)}`;
+    return text.slice(0, 4000);
+  }
+  function messageRenderKey(msgs, loading) {
+    const list = msgs || [];
+    return list.map((m, idx) => JSON.stringify({
       id: m.id || m.messageId || '',
       type: m.type || m.role || '',
-      text: m.text || '',
-      ago: m.ago || '',
-      images: (m.images || []).map((i) => i.path || i.src || ''),
+      text: stableTextKey(m, idx, list.length, loading),
+      images: stableImageKey(m.images),
+      pending: !!m.pending,
+      failed: !!m.failed,
     })).join('\n');
   }
   function scrollChatToEnd() {
@@ -127,25 +732,28 @@
       if (btn.dataset.bound === '1') return;
       btn.dataset.bound = '1';
       const img = btn.querySelector('img');
-      if (img) {
-        img.removeAttribute('loading');
-        img.addEventListener('load', () => {
-          if (chatPinnedBottom) scrollChatToEnd();
-        }, { once: true });
+      if (img && btn.dataset.gif === '1') {
+        img.loading = 'eager';
+        img.decoding = 'async';
       }
       btn.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
         const url = btn.dataset.img || img?.src;
         if (!url || btn.classList.contains('broken')) return;
-        openImagePreview(url, img?.alt || 'Image');
+        const label = btn.dataset.gif === '1' ? 'GIF' : (img?.alt || 'Image');
+        openImagePreview(url, label);
       };
     });
   }
-  function renderChatMessages(msgs) {
-    const renderKey = messageRenderKey(msgs);
-    const preserveScroll = !chatPinnedBottom;
+  function renderChatMessages(msgs, opts) {
+    const options = opts || {};
+    const loading = !!options.loading;
+    const renderKey = messageRenderKey(msgs, loading);
+    const preserveScroll = !chatPinnedBottom || options.preserveScroll;
     const prevTop = chatLog.scrollTop;
+    const prevHeight = chatLog.scrollHeight;
+    const msgCount = (msgs || []).length;
     if (renderKey === lastChatRenderKey && chatLog.childElementCount > 0) {
       bindMessageImages(chatLog);
       return;
@@ -155,21 +763,36 @@
       if (m.type === 'footnote') {
         return `<div class="msgFoot">${escapeHtml(m.text)}</div>`;
       }
-      const cls = escapeHtml(m.type || m.role || 'message');
+      const cls = [
+        escapeHtml(m.type || m.role || 'message'),
+        m.pending ? 'pending' : '',
+        m.failed ? 'failed' : '',
+      ].filter(Boolean).join(' ');
       const role = messageRoleLabel(m);
       const roleHtml = role ? `<div class="role">${escapeHtml(role)}</div>` : '';
-      const editable = m.editable || m.type === 'human' ? ' data-edit="1"' : '';
+      const editable = !m.failed && (m.editable || m.type === 'human') ? ' data-edit="1"' : '';
+      const retry = m.failed ? ' data-retry="1"' : '';
       const mid = escapeHtml(m.messageId || m.id || '');
       const images = (m.images || []).map((image) => {
         const src = agentImageUrl(image);
-        return `<button type="button" class="msgImageBtn" data-img="${escapeHtml(src)}"><img src="${escapeHtml(src)}" alt="${escapeHtml(image.alt || 'Agent image')}" onerror="this.closest('.msgImageBtn')?.classList.add('broken')"/><span class="brokenLabel">Image unavailable</span></button>`;
+        const gifCls = isGifMedia(image, src) ? ' is-gif' : '';
+        const label = isGifMedia(image, src) ? 'GIF' : (image.alt || 'Agent image');
+        const gif = isGifMedia(image, src);
+        const lazyAttr = gif ? ' loading="eager" decoding="async"' : ' loading="lazy" decoding="async"';
+        return `<button type="button" class="msgImageBtn${gifCls}" data-img="${escapeHtml(src)}" data-gif="${gif ? '1' : '0'}"><img src="${escapeHtml(src)}" alt="${escapeHtml(image.alt || label)}"${lazyAttr} onerror="this.closest('.msgImageBtn')?.classList.add('broken')"/><span class="mediaBadge">${escapeHtml(label)}</span><span class="brokenLabel">Image unavailable</span></button>`;
       }).join('');
       const gallery = images ? `<div class="msgImages">${images}</div>` : '';
       const ago = m.ago ? `<div class="msgTime">${escapeHtml(m.ago)}</div>` : '';
-      return `<div class="msg ${cls}" data-mid="${mid}"${editable}>${roleHtml}${gallery}<div class="body">${escapeHtml(m.text)}</div>${ago}</div>`;
+      return `<div class="msg ${cls}" data-mid="${mid}"${editable}${retry}>${roleHtml}${gallery}<div class="body">${escapeHtml(m.text)}</div>${ago}</div>`;
     }).join('') || '<div class="msg"><div class="body" style="opacity:.5">No messages yet. Open a chat from ☰ or tap + Agent.</div></div>';
-    if (preserveScroll) chatLog.scrollTop = prevTop;
-    else scrollChatToEnd();
+    const grew = msgCount > lastRenderedMsgCount;
+    lastRenderedMsgCount = msgCount;
+    if (preserveScroll) {
+      const heightDelta = chatLog.scrollHeight - prevHeight;
+      chatLog.scrollTop = Math.max(0, prevTop + heightDelta);
+    } else if (options.forceScroll || (chatPinnedBottom && grew && Date.now() - userScrolledUpAt > 800)) {
+      scrollChatToEnd();
+    }
     bindMessageImages(chatLog);
     chatLog.querySelectorAll('.msg[data-edit="1"]').forEach((el) => {
       el.onclick = () => {
@@ -178,6 +801,9 @@
         sheet.classList.remove('open');
         editModal.classList.add('open');
       };
+    });
+    chatLog.querySelectorAll('.msg[data-retry="1"]').forEach((el) => {
+      el.onclick = () => retryOptimisticMessage(el);
     });
   }
   function renderPendingImages() {
@@ -236,6 +862,7 @@
   function closeSheet() {
     sheet.classList.remove('open');
     editModal.classList.remove('open');
+    closeNewAgentModal();
   }
   function openSheet(title, html) {
     document.getElementById('sheetTitle').textContent = title;
@@ -393,8 +1020,14 @@
     const out = [];
     for (const m of msgs || []) {
       const kind = String(m.type || m.role || '').toLowerCase();
-      const t = String(m.text || '').trim();
+      let t = String(m.text || '').trim();
       if (CHAT_NOISE.has(kind)) continue;
+      if (kind === 'streaming') {
+        if (!t) continue;
+        const preview = String(m.preview || t);
+        out.push({ ...m, type: 'footnote', text: preview.length > 160 ? `${preview.slice(0, 157)}…` : preview });
+        continue;
+      }
       if (kind === 'timestamp' || TIMESTAMP_RE.test(t)) {
         if (out.length) {
           const prev = out[out.length - 1];
@@ -416,6 +1049,27 @@
       }
       out.push(m);
     }
+    if (loading && out.length) {
+      const last = out[out.length - 1];
+      const kind = String(last.type || last.role || '').toLowerCase();
+      // Only collapse the tail while it is genuinely mid-stream. A completed
+      // reply must stay a full message even if the agent is busy again.
+      if (
+        last.streaming &&
+        (kind === 'assistant' || kind === 'ai') &&
+        !(last.images || []).length
+      ) {
+        const preview = String(last.preview || last.text || '').trim();
+        if (preview) {
+          out.pop();
+          out.push({
+            ...last,
+            type: 'footnote',
+            text: preview.length > 160 ? `${preview.slice(0, 157)}…` : preview,
+          });
+        }
+      }
+    }
     return out;
   }
 
@@ -429,6 +1083,13 @@
     const runner = document.getElementById('chatRunner');
     if (!runner) return;
     runner.classList.remove('approval');
+    // Dedicated subagent data carries more useful status than the generic
+    // parent runner, but only when it belongs to the conversation on screen.
+    if (subagentsForActiveConversation(state)?.running > 0 && !hasApprove && !hasReject) {
+      runner.classList.remove('show');
+      runner.innerHTML = '';
+      return;
+    }
     if (state.loading) {
       const st = String(state.status || 'Running…').slice(0, 140);
       runner.innerHTML = `<span class="runnerDot" aria-hidden="true"></span><span class="runnerText">${escapeHtml(st)}</span>`;
@@ -442,6 +1103,101 @@
     }
     runner.classList.remove('show');
     runner.innerHTML = '';
+  }
+
+  function subagentsForActiveConversation(state) {
+    const payload = state?.subagents;
+    if (!payload || Array.isArray(payload) || typeof payload !== 'object') return null;
+    const source = payload.conversation || {};
+    const target = sendTarget(state);
+    const sourceId = String(source.id || '');
+    const sourceTitle = String(source.title || '');
+    const targetId = String(target.id || '');
+    const targetTitle = String(target.title || '');
+    if ((!sourceId && !sourceTitle) || (!targetId && !targetTitle)) return null;
+    const matches =
+      !!(sourceId && targetId && sourceId === targetId) ||
+      !!(sourceTitle && targetTitle && titlesMatch(targetTitle, sourceTitle));
+    return matches ? payload : null;
+  }
+
+  function renderSubagentDock(state, hasAction) {
+    if (!agentTreeDock || !agentTreeToggle || !agentTreeList) return;
+    const payload = subagentsForActiveConversation(state);
+    const running = Number(payload?.running || 0);
+    if (!payload || running <= 0 || tab !== 'agent') {
+      agentTreeDock.classList.remove('show', 'above-runner');
+      agentTreeDock.setAttribute('aria-hidden', 'true');
+      agentTreeList.innerHTML = '';
+      lastAgentTreeRenderKey = '';
+      return;
+    }
+
+    const groups = Array.isArray(payload.groups) ? payload.groups : [];
+    const agents = Array.isArray(payload.agents) ? payload.agents : [];
+    const source = payload.conversation || {};
+    const setKey = [
+      source.id,
+      source.title,
+      ...groups.map((group) => `${group.id}:${group.state}:${group.count}`),
+      ...agents.map((agent) => agent.id || `${agent.index}:${agent.title}`),
+    ].join('|');
+    if (setKey !== lastAgentTreeSetKey) {
+      agentTreeExpanded = false;
+      lastAgentTreeSetKey = setKey;
+    }
+    const errors = Number(payload.error || 0);
+    const priorityAgents = [
+      ...agents.filter((agent) => agent.state === 'running'),
+      ...agents.filter((agent) => agent.state === 'error'),
+      ...agents.filter((agent) => agent.state === 'completed'),
+    ];
+    const summary = `(${running} sub agent${running === 1 ? '' : 's'})`;
+    const renderKey = JSON.stringify({
+      expanded: agentTreeExpanded,
+      action: !!hasAction,
+      conversation: source,
+      groups: groups.map((group) => [
+        group.id, group.state, group.count, group.running, group.action, group.details,
+      ]),
+      agents: agents.map((agent) => [
+        agent.id, agent.state, agent.label, agent.title, agent.status,
+      ]),
+    });
+    agentTreeDock.classList.add('show');
+    agentTreeDock.classList.toggle('above-runner', !!hasAction);
+    agentTreeDock.setAttribute('aria-hidden', 'false');
+    agentTreeToggle.textContent = summary;
+    agentTreeToggle.setAttribute('aria-expanded', String(agentTreeExpanded));
+    agentTreeToggle.disabled = false;
+    agentTreeToggle.setAttribute(
+      'aria-label',
+      `${running} subagents running. ${errors} failed. Tap to ${agentTreeExpanded ? 'collapse' : 'show details'}.`
+    );
+    if (renderKey === lastAgentTreeRenderKey) return;
+    lastAgentTreeRenderKey = renderKey;
+    if (!agentTreeExpanded) {
+      agentTreeList.innerHTML = '';
+      return;
+    }
+    if (priorityAgents.length) {
+      agentTreeList.innerHTML = priorityAgents.map((agent, index) => {
+        const stateName = String(agent.state || 'running').toLowerCase();
+        const number = Number(agent.index) || index + 1;
+        const label = agent.label || `Agent ${number}`;
+        const title = agent.title || label;
+        const status = agent.status || (
+          stateName === 'running' ? 'Running' : stateName === 'error' ? 'Failed' : 'Completed'
+        );
+        const accessible = `${label}: ${title}. ${status}. ${stateName}.`;
+        const offset = Math.min(index * 4, 16);
+        return `<div class="agentTreeCard" data-state="${escapeHtml(stateName)}" style="--agent-offset:${offset}px" role="status" aria-label="${escapeHtml(accessible)}" title="${escapeHtml(accessible)}"><span class="agentTreeIndex"><span class="agentTreeDot" aria-hidden="true"></span>A${number}</span><span class="agentTreeTitle">${escapeHtml(title)}</span><span class="agentTreeStatus">${escapeHtml(status)}</span></div>`;
+      }).join('');
+      return;
+    }
+    const group = groups.find((item) => Number(item.running || 0) > 0);
+    const detail = group?.details || `${running} subagents`;
+    agentTreeList.innerHTML = `<div class="agentTreeCard" data-state="running" role="status" aria-label="${escapeHtml(`${running} subagents running`)}"><span class="agentTreeIndex"><span class="agentTreeDot" aria-hidden="true"></span></span><span class="agentTreeTitle">${escapeHtml(detail)}</span><span class="agentTreeStatus">Running</span></div>`;
   }
 
   function tabWorking(tabs, chat, state) {
@@ -461,7 +1217,7 @@
       const cls = [active ? 'active' : '', working ? 'working' : ''].filter(Boolean).join(' ');
       const badge = working ? '<span class="workBadge" aria-hidden="true"></span>' : '';
       const meta = working ? 'Working' : sub;
-      return `<button type="button" data-id="${escapeHtml(c.id != null ? c.id : '')}" class="${cls}">${badge}${escapeHtml(c.title)}<span class="sub">${escapeHtml(meta)}</span></button>`;
+      return `<button type="button" data-id="${escapeHtml(c.id != null ? c.id : '')}" data-title="${escapeHtml(c.title || '')}" class="${cls}">${badge}${escapeHtml(c.title)}<span class="sub">${escapeHtml(meta)}</span></button>`;
     };
     if (repos.length) {
       repoList.innerHTML = repos.map((g) => {
@@ -480,13 +1236,28 @@
     }
     repoList.querySelectorAll('button[data-id]').forEach((btn) => {
       btn.onclick = () => {
+        const tabId = btn.dataset.id;
+        const title = normalizeConvTitle(btn.dataset.title || btn.textContent || '');
+        setActiveConversation(tabId, title);
+        const hasCache = switchCacheReady(tabId);
+        pendingTabSwitch = { id: tabId, title, at: Date.now(), hasCache };
+        lastChatRenderKey = '';
         repoList.querySelectorAll('button[data-id]').forEach((row) => row.classList.remove('active'));
         btn.classList.add('active');
-        chatLog.innerHTML = '<div class="msg"><div class="body" style="opacity:.55">Loading conversation…</div></div>';
-        lastChatRenderKey = '';
+        if (hasCache) {
+          showCachedConversation(tabId, getConvCache(tabId), true);
+        } else {
+          chatLog.innerHTML = '<div class="msg"><div class="body" style="opacity:.55">Loading conversation…</div></div>';
+          lastChatRenderKey = '';
+        }
         chatPinnedBottom = true;
-        meta.textContent = `opening ${btn.firstChild?.textContent || 'conversation'}…`;
-        agentSend({ type: 'select_tab', id: btn.dataset.id });
+        meta.textContent = `opening ${title || 'conversation'}…`;
+        hydrateConversationCache(tabId).then((remote) => {
+          if (!remote?.messages?.length || pendingTabSwitch?.id !== tabId) return;
+          pendingTabSwitch.hasCache = true;
+          showCachedConversation(tabId, remote, true);
+        });
+        agentSend({ type: 'select_tab', id: tabId, tab_title: title });
         openDrawer(false);
       };
     });
@@ -549,8 +1320,7 @@
 
     const mode = String(state.mode || '').toLowerCase();
     document.querySelectorAll('#modeRow button').forEach((btn) => {
-      const m = btn.dataset.mode;
-      btn.classList.toggle('on', mode === m || (m === 'multitask' && (mode === 'triage' || mode === 'multitask')));
+      btn.classList.toggle('on', btn.dataset.mode === composerMode);
     });
 
     if (!state.cdp || state.error) {
@@ -572,20 +1342,81 @@
     live.textContent = '';
     live.classList.remove('show');
     renderRunner(state, hasApprove, hasReject);
+    renderSubagentDock(state, hasApprove || hasReject);
 
     renderQueue(state);
     renderRepos(state);
 
-    const msgs = normalizeMessages(state.messages, !!state.loading);
-    renderChatMessages(msgs);
+    const switching = !!state.switching;
+    if (pendingTabSwitch) {
+      const switchTarget = { id: pendingTabSwitch.id, title: pendingTabSwitch.title };
+      const matched = conversationMatches(state, switchTarget);
+      const timedOut = Date.now() - pendingTabSwitch.at > 12000;
+
+      if (!switchCacheReady(pendingTabSwitch.id) && !pendingTabSwitch.hasCache) {
+        chatLog.innerHTML = '<div class="msg"><div class="body" style="opacity:.55">Loading conversation…</div></div>';
+        renderRunner(state, hasApprove, hasReject);
+        if (!matched && !timedOut) return;
+      } else if (switchCacheReady(pendingTabSwitch.id) && !pendingTabSwitch.hasCache) {
+        pendingTabSwitch.hasCache = true;
+        showCachedConversation(pendingTabSwitch.id, getConvCache(pendingTabSwitch.id), !matched);
+      }
+
+      if ((matched && !switching) || timedOut) {
+        if (matched) {
+          const activeTab = (state.tabs || []).find((t) => t.active);
+          setActiveConversation(
+            pendingTabSwitch.id,
+            activeTab?.title || pendingTabSwitch.title
+          );
+        }
+        pendingTabSwitch = null;
+        lastChatRenderKey = '';
+        if (timedOut && !matched) showToast('Still syncing conversation in background');
+      } else if (tab === 'agent') {
+        meta.textContent = `${pendingTabSwitch.title || 'Conversation'} · syncing…`;
+      }
+    }
+
+    const activeTab = (state.tabs || []).find((t) => t.active);
+    const target = sendTarget(state);
+    let messagesForView = state.messages || [];
+    let syncingMismatch = false;
+    const liveAllowed = conversationMatches(state, target) && !switching;
+
+    if ((target.id || target.title) && !liveAllowed) {
+      syncingMismatch = true;
+      const cached = getConvCache(target.id);
+      messagesForView = cached?.messages?.length ? cached.messages : [];
+    } else if (activeTab && (target.id || target.title)) {
+      setActiveConversation(activeTab.id, activeTab.title);
+      messagesForView = state.messages || [];
+    }
+
+    const cacheTabId = target.id || activeTab?.id || state.selectedTabId;
+    if (cacheTabId && liveAllowed && (state.messages || []).length) {
+      saveConvCacheEntry(cacheTabId, {
+        title: activeTab?.title || target.title || state.selectedTabTitle || '',
+        messages: state.messages,
+      });
+    }
+
+    reconcileOptimistic(messagesForView);
+    if (liveAllowed) reconcileOutboxWithMessages(messagesForView, cacheTabId);
+    dismissStaleOptimistic(!!state.loading);
+    const scopedOptimistic = optimisticMessages.filter(
+      (m) => !m.tabId || m.tabId === target.id
+    );
+    const msgs = normalizeMessages(messagesForView, !!state.loading).concat(scopedOptimistic);
+    renderChatMessages(msgs, { loading: !!state.loading });
 
     if (tab === 'agent') {
-      const active = (state.tabs || []).find((t) => t.active);
-      const wsName = active?.title || state.workspace || state.targetTitle || 'Agent';
+      const wsName = target.title || activeTab?.title || state.workspace || state.targetTitle || 'Agent';
       meta.textContent = state.cdp
-        ? (wsName + (state.loading ? ' · working' : ''))
+        ? (wsName + (syncingMismatch ? ' · syncing…' : state.loading ? ' · working' : ''))
         : 'CDP offline';
     }
+    return;
   }
 
   function renderModelsSheet(models) {
@@ -633,6 +1464,8 @@
       agentConnecting = false;
       agentDelay = 600;
       if (tab === 'agent') meta.textContent = 'agent live';
+      flushClientOutbox(false, true);
+      prefetchServerCaches();
       try {
         if (Notification.permission === 'default') Notification.requestPermission();
       } catch (e) {}
@@ -643,12 +1476,79 @@
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === 'state') renderAgent(msg.state);
-        if (msg.type === 'models') renderModelsSheet(msg.models || []);
+        if (msg.type === 'models') {
+          renderModelsSheet(msg.models || []);
+          if (newAgentModal.classList.contains('open')) renderNewAgentModels(msg.models || []);
+        }
         if (msg.type === 'done') showToast(msg.text || 'Agent finished');
-        if (msg.type === 'result' && msg.error) {
-          agentBanner.textContent = msg.error;
-          agentBanner.classList.add('show');
-          showToast(msg.error);
+        if (msg.type === 'prompt_sent' && msg.text) {
+          const payload = {
+            text: msg.text,
+            tab_id: msg.tab_id || msg.tabId || '',
+            tab_title: msg.tab_title || msg.tabTitle || '',
+          };
+          markOptimisticSent(msg.text, payload.tab_id);
+          dropClientOutbox(payload);
+        }
+        if (msg.type === 'prompt_failed' && msg.text) {
+          const payload = {
+            text: msg.text,
+            tab_id: msg.tab_id || msg.tabId || '',
+            tab_title: msg.tab_title || msg.tabTitle || '',
+          };
+          if (msg.permanent) {
+            dropClientOutbox(payload);
+            failOptimistic(msg.text, msg.error || 'Send failed', payload.tab_id);
+            showToast(msg.error || 'Message could not be sent');
+          } else {
+            // Host is still auto-retrying — don't offer manual Retry (avoids duplicates).
+            optimisticMessages.forEach((opt) => {
+              if (payload.tab_id && opt.tabId && opt.tabId !== payload.tab_id) return;
+              if (normalizeForMatch(opt.text) !== normalizeForMatch(msg.text)) return;
+              opt.pending = true;
+              opt.failed = false;
+              opt.ago = `retrying… (${msg.attempts || '?'})`;
+            });
+            lastChatRenderKey = '';
+          }
+        }
+        if (msg.type === 'cache_update' && msg.cache?.messages?.length) {
+          const tabId = msg.tabId || msg.cache.tabId || '';
+          if (tabId) {
+            saveConvCacheEntry(tabId, msg.cache);
+            if (pendingTabSwitch?.id === tabId && !pendingTabSwitch.hasCache) {
+              pendingTabSwitch.hasCache = true;
+              showCachedConversation(tabId, msg.cache, !conversationMatches(agentState, pendingTabSwitch));
+            }
+          }
+        }
+        if (msg.type === 'result') {
+          if (msg.text && (msg.sent || msg.queued || msg.direct_error || msg.error)) {
+            handlePromptDeliveryResult(msg, {
+              text: msg.text,
+              tab_id: msg.tab_id || msg.tabId || '',
+              tab_title: msg.tab_title || msg.tabTitle || '',
+            });
+          }
+          if (msg.cache?.messages?.length) {
+            const tabId = msg.cache.tabId || msg.tab_id || pendingTabSwitch?.id || activeConversation.id;
+            if (tabId) {
+              const prevCount = getConvCache(tabId)?.messages?.length || 0;
+              saveConvCacheEntry(tabId, msg.cache);
+              if (pendingTabSwitch?.id === tabId) {
+                pendingTabSwitch.hasCache = true;
+                if (!conversationMatches(agentState, pendingTabSwitch) || msg.cache.messages.length > prevCount) {
+                  lastChatRenderKey = '';
+                  showCachedConversation(tabId, msg.cache, !conversationMatches(agentState, pendingTabSwitch));
+                }
+              }
+            }
+          }
+          if (msg.error && !msg.text) {
+            agentBanner.textContent = msg.error;
+            agentBanner.classList.add('show');
+            showToast(msg.error);
+          }
         }
       } catch (e) {}
     };
@@ -659,7 +1559,27 @@
     agentDelay = Math.min(8000, Math.floor(agentDelay * 1.6));
   }
   function agentSend(obj) {
-    if (aws && aws.readyState === 1) aws.send(JSON.stringify(obj));
+    if (obj?.type === 'prompt') {
+      const target = promptTarget(agentState);
+      const payload = {
+        type: 'prompt',
+        text: obj.text,
+        images: obj.images || [],
+        tab_id: obj.tab_id || obj.tabId || target.tab_id,
+        tab_title: obj.tab_title || obj.tabTitle || target.tab_title,
+      };
+      // Prompts have exactly one transport: durable HTTP. Sending the same
+      // payload over both WebSocket and the browser outbox raced reconnects
+      // and delivered duplicate/split messages, especially with large images.
+      const queued = queueClientOutbox(payload);
+      postPromptDurable(queued, false).then((result) => handlePromptDeliveryResult(result, queued));
+      return;
+    }
+    if (aws && aws.readyState === 1) aws.send(JSON.stringify({
+      ...obj,
+      tab_id: obj.tab_id || obj.tabId || promptTarget(agentState).tab_id,
+      tab_title: obj.tab_title || obj.tabTitle || promptTarget(agentState).tab_title,
+    }));
   }
 
   let reconnectDelay = 600, reconnectTimer = null, connecting = false;
@@ -866,13 +1786,15 @@
   }
 
   async function sendText() {
-    const v = text.value;
+    const v = preparePromptText(text.value);
     if (!v.trim() && !pendingImages.length) return;
     if (tab === 'agent') {
+      appendOptimisticHuman(v, pendingImages.length);
       agentSend({
         type: 'prompt',
         text: v,
         images: pendingImages.map(({ name, mime, data }) => ({ name, mime, data })),
+        ...promptTarget(agentState),
       });
       pendingImages.forEach((image) => URL.revokeObjectURL(image.preview));
       pendingImages = [];
@@ -899,8 +1821,19 @@
   document.getElementById('sheetClose').onclick = () => closeSheet();
   document.getElementById('editClose').onclick = () => closeSheet();
   scrim.onclick = () => { openDrawer(false); closeSheet(); };
-  document.getElementById('newAgentBtn').onclick = () => agentSend({ type: 'new_chat' });
-  document.getElementById('drawerNew').onclick = () => { agentSend({ type: 'new_chat' }); openDrawer(false); };
+  document.getElementById('newAgentBtn').onclick = () => openNewAgentModal();
+  document.getElementById('drawerNew').onclick = () => openNewAgentModal();
+  document.getElementById('newAgentClose').onclick = () => closeNewAgentModal();
+  document.getElementById('newAgentBrowse').onclick = () => loadNewAgentBrowse(newAgentBrowsePath);
+  document.getElementById('newAgentCreate').onclick = () => createNewAgent();
+  document.querySelectorAll('#newAgentModeRow button').forEach((btn) => {
+    btn.onclick = () => {
+      newAgentMode = btn.dataset.mode || 'agent';
+      document.querySelectorAll('#newAgentModeRow button').forEach((row) => {
+        row.classList.toggle('on', row.dataset.mode === newAgentMode);
+      });
+    };
+  });
   document.getElementById('cropBtn').onclick = cycleCrop;
   document.getElementById('sendBtn').onclick = sendText;
   document.getElementById('attachBtn').onclick = () => imageInput.click();
@@ -918,8 +1851,8 @@
   text.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }
   });
-  document.getElementById('approveBtn').onclick = () => agentSend({ type: 'approve' });
-  document.getElementById('rejectBtn').onclick = () => agentSend({ type: 'reject' });
+  document.getElementById('approveBtn').onclick = () => agentSend({ type: 'approve', ...promptTarget(agentState) });
+  document.getElementById('rejectBtn').onclick = () => agentSend({ type: 'reject', ...promptTarget(agentState) });
   document.getElementById('modelBtn').onclick = () => agentSend({ type: 'list_models' });
   document.getElementById('usageBtn').onclick = () => {
     const summary = renderUsage(agentState || {}) || 'No usage yet';
@@ -928,12 +1861,20 @@
       <div class="sub" style="padding:8px">Cursor rarely exposes full token counts over CDP. This tracks session prompts / accepts / model changes, plus any context % found in the UI.</div>`);
   };
   document.querySelectorAll('#modeRow button').forEach((btn) => {
-    btn.onclick = () => agentSend({ type: 'set_mode', mode: btn.dataset.mode });
+    btn.onclick = () => setComposerMode(btn.dataset.mode);
   });
+  agentTreeToggle.onclick = () => {
+    agentTreeExpanded = !agentTreeExpanded;
+    lastAgentTreeRenderKey = '';
+    renderSubagentDock(
+      agentState,
+      (agentState?.approvals || []).length > 0 || (agentState?.rejects || []).length > 0
+    );
+  };
   document.getElementById('editSend').onclick = () => {
-    const v = editText.value.trim();
+    const v = preparePromptText(editText.value.trim());
     if (!v) return;
-    agentSend({ type: 'edit_message', id: editMsgId || '', text: v });
+    agentSend({ type: 'edit_message', id: editMsgId || '', text: v, ...promptTarget(agentState) });
     closeSheet();
   };
   document.getElementById('reconnectBtn').onclick = () => {
@@ -1004,5 +1945,24 @@
   updateDockVisibility();
   syncVisualViewport();
   setTab('agent');
+  setComposerMode(readAgentPrefs().mode || 'agent');
+  window.addEventListener('pagehide', () => { flushClientOutbox(true); });
+  flushClientOutbox(false, true);
+  setInterval(() => {
+    if (!aws || aws.readyState !== 1) flushClientOutbox(false);
+  }, 20000);
+  // The switch timeout is only evaluated when a state message arrives, so a
+  // silent host would otherwise leave "Loading conversation…" up indefinitely.
+  setInterval(() => {
+    if (!pendingTabSwitch) return;
+    if (Date.now() - pendingTabSwitch.at < 15000) return;
+    const stuckId = pendingTabSwitch.id;
+    pendingTabSwitch = null;
+    lastChatRenderKey = '';
+    const cached = getConvCache(stuckId);
+    if (cached?.messages?.length) showCachedConversation(stuckId, cached, true);
+    else if (agentState) renderAgent(agentState);
+    showToast('Conversation is slow to load — showing what we have');
+  }, 3000);
   connectAgent();
 })();

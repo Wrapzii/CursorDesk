@@ -4,11 +4,11 @@ title CursorDesk
 
 if /I "%~1"=="-Stop" (
   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Start-CursorDesk.ps1" -Stop
-  goto :done
+  goto :done_quiet
 )
 if /I "%~1"=="-Restart" (
   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Start-CursorDesk.ps1" -Restart
-  goto :done
+  goto :done_quiet
 )
 if /I "%~1"=="-InstallTailscale" (
   powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Start-CursorDesk.ps1" -InstallTailscale
@@ -27,6 +27,9 @@ echo.
 echo CursorDesk - one script for install, start, stop, and restart.
 echo.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Start-CursorDesk.ps1"
+
+:done_quiet
+exit /b 0
 
 :done
 echo.

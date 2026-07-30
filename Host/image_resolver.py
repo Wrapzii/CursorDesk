@@ -46,6 +46,7 @@ IMAGE_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 DEFAULT_IMAGE_SUBDIRS = (
+    "Saved/GIFs",
     "Saved/FXShots/view",
     "Saved/FXShots",
     "Saved/Screenshots",
@@ -107,7 +108,8 @@ def prefer_display_paths(paths: list[str]) -> list[str]:
         current = best.get(stem)
         if not current or _display_path_score(path) > _display_path_score(current):
             best[stem] = path
-    return [best[stem] for stem in order if stem in best]
+    out = [best[stem] for stem in order if stem in best]
+    return sorted(out, key=lambda p: p.lower())
 
 
 def normalize_path(raw: str) -> str:
